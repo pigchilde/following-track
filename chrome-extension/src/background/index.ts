@@ -25,6 +25,7 @@ console.log('background script loaded');
 let globalPauseState = false;
 let currentOperationId: string | null = null;
 let retryAttempts = new Map<string, number>(); // 用于记录重试次数
+let currentTabId: number | null = null; // 添加全局变量跟踪当前标签页ID
 
 // 监听插件图标点击事件，打开侧边栏
 chrome.action.onClicked.addListener(async (tab: chrome.tabs.Tab) => {
@@ -53,7 +54,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     // 处理获取 Twitter 关注数的请求
-    getFollowingCountFromTwitter(request.screenName, request.operationId)
+    getFollowingCountFromTwitter(request.screenName, request.operationId, request.reuseTab || false)
       .then(count => {
         console.log(`成功获取 ${request.screenName} 的关注数: ${count}，准备返回结果`);
         const response = { success: true, count: count };
@@ -146,9 +147,29 @@ function waitForPageLoad(timeout: number = 10000): Promise<void> {
   });
 }
 
+// 在现有标签页中导航到Twitter用户页面
+const navigateToTwitterUser = async (tabId: number, screenName: string): Promise<void> => {
+  console.log(`导航到用户 ${screenName} 的页面，标签页ID: ${tabId}`);
+  const twitterUrl = `https://twitter.com/${screenName}`;
+
+  try {
+    await chrome.tabs.update(tabId, { url: twitterUrl });
+    console.log(`标签页 ${tabId} 已导航到 ${twitterUrl}`);
+  } catch (error) {
+    console.error(`导航到 ${twitterUrl} 失败:`, error);
+    throw new Error(`导航失败: ${error instanceof Error ? error.message : '未知错误'}`);
+  }
+};
+
 // 在 Twitter 页面获取关注数
-const getFollowingCountFromTwitter = async (screenName: string, operationId: string): Promise<number> => {
-  console.log(`开始获取 ${screenName} 的关注数...，操作ID: ${operationId}，当前操作ID: ${currentOperationId}`);
+const getFollowingCountFromTwitter = async (
+  screenName: string,
+  operationId: string,
+  reuseTab: boolean = false,
+): Promise<number> => {
+  console.log(
+    `开始获取 ${screenName} 的关注数...，操作ID: ${operationId}，当前操作ID: ${currentOperationId}，重用标签页: ${reuseTab}`,
+  );
 
   // 检查是否暂停，但不再检查操作ID是否匹配
   if (globalPauseState) {
@@ -170,41 +191,64 @@ const getFollowingCountFromTwitter = async (screenName: string, operationId: str
   try {
     // 构建 Twitter 用户页面 URL
     const twitterUrl = `https://twitter.com/${screenName}`;
-    console.log(`正在打开 Twitter 页面: ${twitterUrl}`);
 
-    // 创建新标签页
-    try {
-      tab = await chrome.tabs.create({
-        url: twitterUrl,
-        active: true, // 设置为激活状态
-      });
-      console.log('标签页创建成功:', tab);
-    } catch (tabError) {
-      console.error('创建标签页时出错:', tabError);
-      throw new Error(`创建标签页失败: ${tabError instanceof Error ? tabError.message : '未知错误'}`);
+    // 如果重用标签页且有可用的标签页ID
+    if (reuseTab && currentTabId) {
+      console.log(`重用标签页 ${currentTabId} 访问 ${twitterUrl}`);
+      try {
+        // 检查标签页是否仍然存在
+        tab = await chrome.tabs.get(currentTabId);
+        // 导航到新的用户页面
+        await navigateToTwitterUser(currentTabId, screenName);
+      } catch (tabError) {
+        console.error(`重用标签页 ${currentTabId} 失败:`, tabError);
+        console.log('将创建新标签页');
+        currentTabId = null; // 重置标签页ID
+        reuseTab = false; // 不再尝试重用
+      }
+    }
+
+    // 如果不重用标签页或重用失败，则创建新标签页
+    if (!reuseTab || !currentTabId) {
+      console.log(`正在打开 Twitter 页面: ${twitterUrl}`);
+      try {
+        tab = await chrome.tabs.create({
+          url: twitterUrl,
+          active: true, // 设置为激活状态
+        });
+        console.log('标签页创建成功:', tab);
+        if (tab && tab.id) {
+          currentTabId = tab.id; // 保存新创建的标签页ID
+          console.log(`更新当前标签页ID为: ${currentTabId}`);
+        }
+      } catch (tabError) {
+        console.error('创建标签页时出错:', tabError);
+        throw new Error(`创建标签页失败: ${tabError instanceof Error ? tabError.message : '未知错误'}`);
+      }
     }
 
     if (!tab || !tab.id) {
-      throw new Error('无法创建标签页或标签页ID为空');
+      throw new Error('无法获取有效的标签页或标签页ID为空');
     }
 
-    console.log(`已创建标签页 ${tab.id}，等待页面加载...`);
+    const tabId = tab.id;
+    console.log(`使用标签页 ${tabId} 等待页面加载...`);
 
     // 等待页面完全加载
     try {
-      await waitForTabComplete(tab.id, operationId);
+      await waitForTabComplete(tabId, operationId);
     } catch (loadError) {
-      console.error(`标签页 ${tab.id} 加载失败:`, loadError);
+      console.error(`标签页 ${tabId} 加载失败:`, loadError);
       // 即使加载失败，也尝试执行脚本
       console.log('尝试在未完全加载的页面上执行脚本...');
     }
 
-    console.log(`标签页 ${tab.id} 准备抓取数据...`);
+    console.log(`标签页 ${tabId} 准备抓取数据...`);
 
     // 注入内容脚本并获取关注数
     let results;
     try {
-      console.log(`准备在标签页 ${tab.id} 中执行脚本...`);
+      console.log(`准备在标签页 ${tabId} 中执行脚本...`);
 
       // 先测试基本的脚本注入功能
       console.log('步骤0: 测试基本脚本注入功能...');
@@ -331,46 +375,81 @@ const getFollowingCountFromTwitter = async (screenName: string, operationId: str
           let foundElements = 0;
 
           for (const selector of selectors) {
-            try {
-              logs.push(`尝试选择器: ${selector}`);
-              const elements = Array.from(document.querySelectorAll(selector));
-              foundElements += elements.length;
-              logs.push(`选择器 ${selector} 找到 ${elements.length} 个元素`);
+            logs.push(`尝试选择器: ${selector}`);
+            const elements = Array.from(document.querySelectorAll(selector));
+            foundElements += elements.length;
 
-              for (const element of elements) {
-                const text = element.textContent?.trim();
-                if (text) {
-                  logs.push(`检查元素文本: "${text}"`);
-                  // 简单的数字提取
-                  const match = text.match(/(\d+)/);
-                  if (match) {
-                    const num = parseInt(match[1], 10);
-                    if (!isNaN(num) && num >= 0) {
-                      logs.push(`成功提取关注数: ${num} (原文本: "${text}")`);
-                      result = num;
-                      break;
-                    }
+            logs.push(`找到 ${elements.length} 个元素匹配 ${selector}`);
+
+            for (const el of elements) {
+              const text = el.textContent?.trim();
+              logs.push(`元素内容: "${text}"`);
+
+              if (text) {
+                // 尝试从文本中提取数字
+                const matches = text.match(/\d+/g);
+                if (matches && matches.length > 0) {
+                  const num = parseInt(matches[0], 10);
+                  if (!isNaN(num) && num > 0) {
+                    logs.push(`从文本 "${text}" 中提取到数字: ${num}`);
+                    result = num;
+                    break;
                   }
                 }
               }
-              if (result !== -1) break;
-            } catch (error) {
-              logs.push(`选择器 ${selector} 执行出错: ${error}`);
+            }
+
+            if (result !== -1) break;
+          }
+
+          // 如果常规选择器没有找到，尝试其他选择器
+          if (result === -1) {
+            logs.push('常规选择器未找到结果，尝试其他选择器...');
+
+            const additionalSelectors = [
+              'a[href*="following"] div',
+              'a[href*="following"] span',
+              'div:contains("following")',
+              'span:contains("following")',
+            ];
+
+            for (const selector of additionalSelectors) {
+              logs.push(`尝试额外选择器: ${selector}`);
+              try {
+                const elements = Array.from(document.querySelectorAll(selector));
+                foundElements += elements.length;
+
+                logs.push(`找到 ${elements.length} 个元素匹配 ${selector}`);
+
+                for (const el of elements) {
+                  const text = el.textContent?.trim();
+                  logs.push(`元素内容: "${text}"`);
+
+                  if (text && /following/i.test(text)) {
+                    const matches = text.match(/\d+/g);
+                    if (matches && matches.length > 0) {
+                      const num = parseInt(matches[0], 10);
+                      if (!isNaN(num) && num > 0) {
+                        logs.push(`从文本 "${text}" 中提取到数字: ${num}`);
+                        result = num;
+                        break;
+                      }
+                    }
+                  }
+                }
+
+                if (result !== -1) break;
+              } catch (err) {
+                logs.push(`选择器 ${selector} 出错: ${err}`);
+              }
             }
           }
 
-          logs.push(`总共找到 ${foundElements} 个相关元素`);
           logs.push(`最终结果: ${result}`);
-
-          return {
-            result: result,
-            logs: logs,
-            timestamp: Date.now(),
-            elementsFound: foundElements,
-          };
+          return { result, logs, timestamp: Date.now(), elementsFound: foundElements };
         },
       });
-      console.log('步骤4完成: 脚本执行结果:', results[0]?.result);
+      console.log('步骤4完成: 主要提取函数执行结果:', results);
 
       // 如果结果为空或无效，尝试使用备用方法
       if (
@@ -398,16 +477,8 @@ const getFollowingCountFromTwitter = async (screenName: string, operationId: str
       throw new Error(`执行脚本失败: ${scriptError instanceof Error ? scriptError.message : '未知错误'}`);
     }
 
-    // 关闭标签页
-    try {
-      if (tab && tab.id) {
-        await chrome.tabs.remove(tab.id);
-        console.log(`已关闭标签页 ${tab.id}`);
-      }
-    } catch (closeError) {
-      console.warn('关闭标签页时出错:', closeError);
-      // 关闭标签页失败不影响结果
-    }
+    // 不再关闭标签页，保留它以便后续使用
+    // 原来的关闭标签页代码被移除了
 
     if (results && results[0] && results[0].result !== null && results[0].result !== undefined) {
       let followingCount: number;
@@ -440,11 +511,15 @@ const getFollowingCountFromTwitter = async (screenName: string, operationId: str
   } catch (error) {
     console.error(`获取 ${screenName} 关注数时出错:`, error);
 
-    // 确保关闭标签页
+    // 出错时才关闭标签页，并重置currentTabId
     try {
       if (tab && tab.id) {
         await chrome.tabs.remove(tab.id);
-        console.log(`已关闭标签页 ${tab.id}`);
+        console.log(`出错时关闭标签页 ${tab.id}`);
+        if (currentTabId === tab.id) {
+          currentTabId = null;
+          console.log('重置当前标签页ID');
+        }
       }
     } catch (closeError) {
       console.warn('关闭标签页时出错:', closeError);
@@ -457,7 +532,7 @@ const getFollowingCountFromTwitter = async (screenName: string, operationId: str
       console.log(`重试第 ${currentRetry + 1} 次获取 ${screenName} 的关注数...`);
       // 等待一段时间后重试
       await new Promise(resolve => setTimeout(resolve, 5000));
-      return await getFollowingCountFromTwitter(screenName, operationId);
+      return await getFollowingCountFromTwitter(screenName, operationId, false); // 重试时创建新标签页
     } else {
       console.log(`用户 ${screenName} 重试次数已用完，返回 -1`);
       retryAttempts.delete(key);
