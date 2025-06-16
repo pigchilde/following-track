@@ -25,6 +25,7 @@ console.log('background script loaded');
 let globalPauseState = false;
 let currentOperationId: string | null = null;
 let retryAttempts = new Map<string, number>(); // 用于记录重试次数
+let tabsMap = new Map<string, number>(); // 存储操作ID到标签页ID的映射
 let currentTabId: number | null = null; // 添加全局变量跟踪当前标签页ID
 
 // 监听插件图标点击事件，打开侧边栏
@@ -192,24 +193,25 @@ const getFollowingCountFromTwitter = async (
     // 构建 Twitter 用户页面 URL
     const twitterUrl = `https://twitter.com/${screenName}`;
 
-    // 如果重用标签页且有可用的标签页ID
-    if (reuseTab && currentTabId) {
-      console.log(`重用标签页 ${currentTabId} 访问 ${twitterUrl}`);
+    // 如果重用标签页且有该操作ID对应的标签页
+    if (reuseTab && tabsMap.has(operationId)) {
+      const tabId = tabsMap.get(operationId)!;
+      console.log(`重用标签页 ${tabId} 访问 ${twitterUrl}，操作ID: ${operationId}`);
       try {
         // 检查标签页是否仍然存在
-        tab = await chrome.tabs.get(currentTabId);
+        tab = await chrome.tabs.get(tabId);
         // 导航到新的用户页面
-        await navigateToTwitterUser(currentTabId, screenName);
+        await navigateToTwitterUser(tabId, screenName);
       } catch (tabError) {
-        console.error(`重用标签页 ${currentTabId} 失败:`, tabError);
+        console.error(`重用标签页 ${tabId} 失败:`, tabError);
         console.log('将创建新标签页');
-        currentTabId = null; // 重置标签页ID
+        tabsMap.delete(operationId); // 移除无效的标签页映射
         reuseTab = false; // 不再尝试重用
       }
     }
 
     // 如果不重用标签页或重用失败，则创建新标签页
-    if (!reuseTab || !currentTabId) {
+    if (!reuseTab || !tabsMap.has(operationId)) {
       console.log(`正在打开 Twitter 页面: ${twitterUrl}`);
       try {
         tab = await chrome.tabs.create({
@@ -218,8 +220,8 @@ const getFollowingCountFromTwitter = async (
         });
         console.log('标签页创建成功:', tab);
         if (tab && tab.id) {
-          currentTabId = tab.id; // 保存新创建的标签页ID
-          console.log(`更新当前标签页ID为: ${currentTabId}`);
+          tabsMap.set(operationId, tab.id); // 保存操作ID到标签页ID的映射
+          console.log(`更新操作 ${operationId} 的标签页ID为: ${tab.id}`);
         }
       } catch (tabError) {
         console.error('创建标签页时出错:', tabError);
@@ -511,14 +513,18 @@ const getFollowingCountFromTwitter = async (
   } catch (error) {
     console.error(`获取 ${screenName} 关注数时出错:`, error);
 
-    // 出错时才关闭标签页，并重置currentTabId
+    // 出错时才关闭标签页，并从映射中移除
     try {
       if (tab && tab.id) {
         await chrome.tabs.remove(tab.id);
         console.log(`出错时关闭标签页 ${tab.id}`);
-        if (currentTabId === tab.id) {
-          currentTabId = null;
-          console.log('重置当前标签页ID');
+        // 从映射中移除
+        for (const [opId, tabId] of tabsMap.entries()) {
+          if (tabId === tab.id) {
+            tabsMap.delete(opId);
+            console.log(`从映射中移除操作 ${opId} 的标签页 ${tabId}`);
+            break;
+          }
         }
       }
     } catch (closeError) {

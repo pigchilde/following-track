@@ -64,6 +64,7 @@ const SidePanel = () => {
   const [currentUser, setCurrentUser] = useState<{ screenName: string; id: number; name: string } | null>(null);
   const [newUsers, setNewUsers] = useState<string[]>([]);
   const [failedUsers, setFailedUsers] = useState<FailedUser[]>([]);
+  const [targetCount, setTargetCount] = useState<string>('');
   const [stats, setStats] = useState<ProcessStats>({
     total: 0,
     processed: 0,
@@ -87,7 +88,20 @@ const SidePanel = () => {
     if (savedFailedUsers) {
       setFailedUsers(JSON.parse(savedFailedUsers));
     }
+
+    // 加载保存的目标条数
+    const savedTargetCount = localStorage.getItem('targetCount');
+    if (savedTargetCount) {
+      setTargetCount(savedTargetCount);
+    }
   }, []);
+
+  // 保存目标条数到本地存储
+  useEffect(() => {
+    if (targetCount.trim()) {
+      localStorage.setItem('targetCount', targetCount);
+    }
+  }, [targetCount]);
 
   // 生成唯一的操作ID
   const generateOperationId = () => {
@@ -98,7 +112,7 @@ const SidePanel = () => {
 
   // 获取用户数据
   const fetchUsers = async (page: number = 1, size: number = 10): Promise<ApiResponse> => {
-    const response = await fetch('http://127.0.0.1:8001/open/crawler/twitter_smart_user/page', {
+    const response = await fetch('http://127.0.0.1:7072/open/crawler/twitter_smart_user/page', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -115,7 +129,8 @@ const SidePanel = () => {
 
   // 更新用户数据
   const updateUser = async (id: number, followingCount: number, newAdditions: number) => {
-    const response = await fetch('http://127.0.0.1:8001/open/crawler/twitter_smart_user/update', {
+    console.log('updateUser', id, followingCount, newAdditions);
+    const response = await fetch('http://127.0.0.1:7072/open/crawler/twitter_smart_user/update', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -160,7 +175,7 @@ const SidePanel = () => {
               console.error(`关注数不是有效数字: ${response.count}`);
               reject(new Error('返回的关注数不是有效数字'));
             } else {
-              console.log(`解析后的关注数: ${count}`);
+              console.log(`✅ 解析后的关注数: ${count} (类型: ${typeof count})，即将返回给调用者`);
               resolve(count);
             }
           } else if (response && response.paused) {
@@ -352,29 +367,46 @@ const SidePanel = () => {
       console.log(
         `用户 ${user.screenName} 关注数获取成功: ${currentFollowingCount}, 数据库中的关注数: ${user.followingCount}`,
       );
+      // 添加详细的数据类型和值比较调试信息
+      console.log(`详细比较信息 - ${user.screenName}:`);
+      console.log(`- currentFollowingCount: ${currentFollowingCount} (类型: ${typeof currentFollowingCount})`);
+      console.log(`- user.followingCount: ${user.followingCount} (类型: ${typeof user.followingCount})`);
+
+      // 确保user.followingCount是数字类型，因为API可能返回字符串
+      const userFollowingCount =
+        typeof user.followingCount === 'number' ? user.followingCount : parseInt(String(user.followingCount), 10);
+
+      console.log(`- 转换后的userFollowingCount: ${userFollowingCount} (类型: ${typeof userFollowingCount})`);
+      console.log(`- 严格相等比较 (===): ${currentFollowingCount === userFollowingCount}`);
+      console.log(`- 不严格相等比较 (==): ${currentFollowingCount == userFollowingCount}`);
+      console.log(`- 不等比较 (!=): ${currentFollowingCount != userFollowingCount}`);
+      console.log(`- 严格不等比较 (!==): ${currentFollowingCount !== userFollowingCount}`);
+
       setStats(prev => ({ ...prev, processed: prev.processed + 1, successful: prev.successful + 1 }));
 
-      if (currentFollowingCount !== user.followingCount) {
-        const newAdditions = currentFollowingCount - user.followingCount;
+      if (currentFollowingCount !== userFollowingCount) {
+        console.log(`🔄 检测到关注数变化，准备调用 updateUser 函数...`);
+        const newAdditions = currentFollowingCount - userFollowingCount;
         console.log(
-          `用户 ${user.screenName} 关注数变化: ${user.followingCount} → ${currentFollowingCount} (${newAdditions > 0 ? '+' : ''}${newAdditions})`,
+          `用户 ${user.screenName} 关注数变化: ${userFollowingCount} → ${currentFollowingCount} (${newAdditions > 0 ? '+' : ''}${newAdditions})`,
         );
 
         // 更新数据库
         try {
+          console.log(`📞 正在调用 updateUser(${user.id}, ${currentFollowingCount}, ${newAdditions})...`);
           await updateUser(user.id, currentFollowingCount, newAdditions);
-          console.log(`成功更新用户 ${user.screenName} 的数据库记录`);
+          console.log(`✅ 成功更新用户 ${user.screenName} 的数据库记录`);
         } catch (updateError) {
-          console.error(`更新用户 ${user.screenName} 数据库记录失败:`, updateError);
+          console.error(`❌ 更新用户 ${user.screenName} 数据库记录失败:`, updateError);
           // 即使数据库更新失败，我们仍然记录变化
         }
 
         // 记录有变化的用户
-        const changeInfo = `${user.screenName} (ID: ${user.id}): ${user.followingCount} → ${currentFollowingCount} (${newAdditions > 0 ? '+' : ''}${newAdditions})`;
+        const changeInfo = `${user.screenName} (ID: ${user.id}): ${userFollowingCount} → ${currentFollowingCount} (${newAdditions > 0 ? '+' : ''}${newAdditions})`;
 
         setStats(prev => ({ ...prev, changed: prev.changed + 1 }));
 
-        console.log(`用户 ${user.screenName} 关注数从 ${user.followingCount} 变为 ${currentFollowingCount}`);
+        console.log(`用户 ${user.screenName} 关注数从 ${userFollowingCount} 变为 ${currentFollowingCount}`);
 
         // 如果是重试模式成功了，从失败列表中移除
         if (isRetryMode) {
@@ -386,7 +418,11 @@ const SidePanel = () => {
 
         return changeInfo;
       } else {
-        console.log(`用户 ${user.screenName} 关注数无变化: ${user.followingCount}`);
+        console.log(`❌ 关注数无变化，跳过更新数据库 - ${user.screenName}`);
+        console.log(
+          `- 原因：currentFollowingCount (${currentFollowingCount}) === userFollowingCount (${userFollowingCount})`,
+        );
+        console.log(`用户 ${user.screenName} 关注数无变化: ${userFollowingCount}`);
         // 如果是重试模式且数据没变化，也算成功，从失败列表中移除
         if (isRetryMode) {
           console.log(`重试成功(无变化)，从失败列表中移除用户 ${user.screenName}`);
@@ -431,6 +467,7 @@ const SidePanel = () => {
       const isFirstUser = i === 0;
       const reuseTab = !isFirstUser; // 第一个用户不重用，后续用户重用
 
+      // 使用分组特定的操作ID，确保每个分组使用独立的标签页
       const result = await processSingleUser(user, operationId, false, reuseTab);
       if (result) {
         newUsersInGroup.push(result);
@@ -438,8 +475,9 @@ const SidePanel = () => {
 
       // 如果不是最后一个用户且没有停止，则等待随机时间
       if (i < users.length - 1 && !shouldStopRef.current) {
-        // 生成5-10秒的随机等待时间
-        const waitTime = Math.floor(Math.random() * (10 - 5 + 1) + 5) * 1000;
+        // 生成20-30秒的随机等待时间
+        // const waitTime = Math.floor(Math.random() * (10 - 5 + 1) + 5) * 1000;
+        const waitTime = Math.floor(Math.random() * (20 - 10 + 1) + 10) * 1000;
         console.log(`用户 ${user.screenName} 处理完成，等待 ${waitTime / 1000} 秒后处理下一个用户...`);
         setProgress(`用户 ${user.screenName} 处理完成，等待 ${waitTime / 1000} 秒后处理下一个用户...`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
@@ -460,6 +498,9 @@ const SidePanel = () => {
     setProgress(`开始重试 ${failedUsers.length} 个失败的用户...`);
 
     const retryResults: string[] = [];
+
+    // 为重试创建一个特定的操作ID
+    const retryOperationId = `${operationIdRef.current}-retry`;
 
     // 失败用户也使用同一个标签页处理
     for (let i = 0; i < failedUsers.length; i++) {
@@ -489,7 +530,7 @@ const SidePanel = () => {
         newAdditions: 0,
       };
 
-      const result = await processSingleUser(userForRetry, operationIdRef.current!, true, reuseTab);
+      const result = await processSingleUser(userForRetry, retryOperationId, true, reuseTab);
       if (result) {
         retryResults.push(result);
       }
@@ -515,6 +556,13 @@ const SidePanel = () => {
       return;
     }
 
+    // 验证输入的目标条数
+    const targetNumber = parseInt(targetCount.trim(), 10);
+    if (!targetCount.trim() || isNaN(targetNumber) || targetNumber <= 0) {
+      setProgress('❌ 请输入有效的处理条数（大于0的整数）');
+      return;
+    }
+
     // 重置状态
     shouldStopRef.current = false;
     setIsLoading(true);
@@ -527,47 +575,92 @@ const SidePanel = () => {
     // 生成新的操作ID
     const newOperationId = generateOperationId();
     operationIdRef.current = newOperationId;
-    console.log(`开始新操作，操作ID: ${newOperationId}`);
+    console.log(`开始新操作，操作ID: ${newOperationId}，目标处理条数: ${targetNumber}`);
 
     try {
       // 首先获取第一页数据以了解总数
       console.log('正在获取第一页数据...');
       const firstPageData = await fetchUsers(1, 10);
       console.log('第一页数据获取成功:', firstPageData);
-      const total = firstPageData.data.pagination.total;
-      const totalPages = Math.ceil(total / 10);
+      const apiTotal = firstPageData.data.pagination.total;
 
-      setStats(prev => ({ ...prev, total }));
-      setProgress(`共 ${total} 个用户，分 ${totalPages} 组处理...`);
-      console.log(`共 ${total} 个用户，分 ${totalPages} 组处理`);
+      // 使用用户指定的条数和API返回的总数中的较小值
+      const actualTotal = Math.min(targetNumber, apiTotal);
+      const totalPages = Math.ceil(actualTotal / 10);
+
+      setStats(prev => ({ ...prev, total: actualTotal }));
+      setProgress(
+        `目标处理 ${targetNumber} 个用户，API总共有 ${apiTotal} 个用户，实际处理 ${actualTotal} 个用户，分 ${totalPages} 组处理...`,
+      );
+      console.log(
+        `目标处理 ${targetNumber} 个用户，API总共有 ${apiTotal} 个用户，实际处理 ${actualTotal} 个用户，分 ${totalPages} 组处理`,
+      );
 
       const allNewUsers: string[] = [];
 
-      // 分组处理
-      for (let page = 1; page <= totalPages && !shouldStopRef.current; page++) {
+      // 准备所有分组的数据
+      const groupPromises: Promise<string[]>[] = [];
+      const groupStats: { page: number; users: number }[] = [];
+      let processedCount = 0; // 追踪已处理的用户数
+
+      // 并行处理所有分组
+      for (let page = 1; page <= totalPages && !shouldStopRef.current && processedCount < actualTotal; page++) {
         if (shouldStopRef.current) break;
 
-        setProgress(`正在处理第 ${page}/${totalPages} 组...`);
-        console.log(`正在处理第 ${page}/${totalPages} 组...`);
+        // 创建一个异步函数来处理每个分组
+        const processGroup = async (pageNum: number): Promise<string[]> => {
+          setProgress(prev => `${prev}\n正在处理第 ${pageNum}/${totalPages} 组...`);
+          console.log(`开始处理第 ${pageNum}/${totalPages} 组...`);
 
-        const pageData = page === 1 ? firstPageData : await fetchUsers(page, 10);
-        const users = pageData.data.list;
-        console.log(`第 ${page} 组有 ${users.length} 个用户`);
+          // 获取当前分组的数据
+          const pageData = pageNum === 1 ? firstPageData : await fetchUsers(pageNum, 10);
+          let users = pageData.data.list;
 
-        if (users.length > 0) {
-          console.log(`开始处理第 ${page} 组的 ${users.length} 个用户...`);
-          const newUsersInGroup = await processUserGroup(users, operationIdRef.current!);
-          console.log(`第 ${page} 组处理完成，发现 ${newUsersInGroup.length} 个用户关注数有变化`);
-          allNewUsers.push(...newUsersInGroup);
-        }
+          // 如果这是最后一组，可能需要限制用户数量
+          const remainingCount = actualTotal - processedCount;
+          if (users.length > remainingCount) {
+            users = users.slice(0, remainingCount);
+          }
 
-        // 组间延迟
-        if (page < totalPages && !shouldStopRef.current) {
-          setProgress(`第 ${page} 组处理完成，等待处理下一组...`);
-          console.log(`第 ${page} 组处理完成，等待 ${5000 / 1000} 秒后处理下一组...`);
-          await new Promise(resolve => setTimeout(resolve, 5000)); // 增加组间延迟
+          console.log(
+            `第 ${pageNum} 组有 ${users.length} 个用户（原始 ${pageData.data.list.length} 个，限制后 ${users.length} 个）`,
+          );
+          groupStats.push({ page: pageNum, users: users.length });
+          processedCount += users.length;
+
+          if (users.length > 0) {
+            console.log(`开始处理第 ${pageNum} 组的 ${users.length} 个用户...`);
+            // 为每个分组创建一个唯一的操作ID，以便区分不同分组的操作
+            const groupOperationId = `${operationIdRef.current}-group-${pageNum}`;
+            const newUsersInGroup = await processUserGroup(users, groupOperationId);
+            console.log(`第 ${pageNum} 组处理完成，发现 ${newUsersInGroup.length} 个用户关注数有变化`);
+            return newUsersInGroup;
+          }
+
+          return [];
+        };
+
+        // 将每个分组的处理添加到Promise数组中
+        groupPromises.push(processGroup(page));
+
+        // 短暂延迟启动下一个分组，避免同时打开太多标签页
+        if (page < totalPages && !shouldStopRef.current && processedCount < actualTotal) {
+          await new Promise(resolve => setTimeout(resolve, 2000));
         }
       }
+
+      // 等待所有分组处理完成
+      console.log(`等待 ${groupPromises.length} 个分组并行处理完成...`);
+      setProgress(prev => `${prev}\n等待 ${groupPromises.length} 个分组并行处理完成...`);
+
+      const results = await Promise.all(groupPromises);
+
+      // 合并所有分组的结果
+      results.forEach(groupResult => {
+        allNewUsers.push(...groupResult);
+      });
+
+      console.log(`所有分组处理完成，分组情况: ${JSON.stringify(groupStats)}`);
 
       if (!shouldStopRef.current) {
         // 尝试重试失败的用户
@@ -625,6 +718,34 @@ const SidePanel = () => {
       <header className={cn('App-header', isLight ? 'text-gray-900' : 'text-gray-100')}>
         <div className="mx-auto max-w-sm p-4">
           <h1 className="mb-4 text-center text-xl font-bold">Twitter 关注数更新工具</h1>
+
+          {/* 处理条数输入框 */}
+          {!isLoading && !isRetrying && (
+            <div className="mb-4">
+              <label
+                htmlFor="targetCount"
+                className={cn('mb-2 block text-sm font-medium', isLight ? 'text-gray-700' : 'text-gray-300')}>
+                处理条数:
+              </label>
+              <input
+                id="targetCount"
+                type="number"
+                min="1"
+                value={targetCount}
+                onChange={e => setTargetCount(e.target.value)}
+                placeholder="请输入要处理的用户数量"
+                className={cn(
+                  'w-full rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2',
+                  isLight
+                    ? 'border-gray-300 bg-white text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:ring-blue-500'
+                    : 'border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-400 focus:border-blue-400 focus:ring-blue-400',
+                )}
+              />
+              <p className={cn('mt-1 text-xs', isLight ? 'text-gray-500' : 'text-gray-400')}>
+                输入一个大于0的整数，如果超过API总数则以API总数为准
+              </p>
+            </div>
+          )}
 
           {/* 统计信息 */}
           {(isLoading || isRetrying) && (
@@ -702,11 +823,22 @@ const SidePanel = () => {
               {!isLoading && !isRetrying ? (
                 <button
                   onClick={updateFollowingCounts}
+                  disabled={
+                    !targetCount.trim() ||
+                    isNaN(parseInt(targetCount.trim(), 10)) ||
+                    parseInt(targetCount.trim(), 10) <= 0
+                  }
                   className={cn(
                     'flex-1 rounded-lg px-4 py-3 font-bold shadow-lg transition-all duration-200',
-                    isLight
-                      ? 'transform bg-blue-500 text-white hover:scale-105 hover:bg-blue-600 hover:shadow-xl'
-                      : 'transform bg-blue-600 text-white hover:scale-105 hover:bg-blue-700 hover:shadow-xl',
+                    !targetCount.trim() ||
+                      isNaN(parseInt(targetCount.trim(), 10)) ||
+                      parseInt(targetCount.trim(), 10) <= 0
+                      ? isLight
+                        ? 'cursor-not-allowed bg-gray-300 text-gray-500'
+                        : 'cursor-not-allowed bg-gray-600 text-gray-400'
+                      : isLight
+                        ? 'transform bg-blue-500 text-white hover:scale-105 hover:bg-blue-600 hover:shadow-xl'
+                        : 'transform bg-blue-600 text-white hover:scale-105 hover:bg-blue-700 hover:shadow-xl',
                   )}>
                   🚀 开始更新关注数
                 </button>
