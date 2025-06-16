@@ -388,14 +388,73 @@ const getFollowingCountFromTwitter = async (
               logs.push(`元素内容: "${text}"`);
 
               if (text) {
-                // 尝试从文本中提取数字
-                const matches = text.match(/\d+/g);
-                if (matches && matches.length > 0) {
-                  const num = parseInt(matches[0], 10);
-                  if (!isNaN(num) && num > 0) {
-                    logs.push(`从文本 "${text}" 中提取到数字: ${num}`);
+                // 尝试从文本中提取数字，正确处理带逗号的数字格式
+                logs.push(`正在解析文本: "${text}"`);
+
+                // 移除逗号和空格，但先检查原始文本中是否有逗号分隔的数字
+                const originalCommaMatch = text.match(/\d{1,3}(?:,\d{3})+/);
+                if (originalCommaMatch) {
+                  // 如果找到了逗号分隔的数字，直接处理
+                  const numStr = originalCommaMatch[0].replace(/,/g, '');
+                  const num = parseInt(numStr, 10);
+                  if (!isNaN(num) && num >= 0) {
+                    logs.push(`从带逗号文本解析出数字: ${num}`);
                     result = num;
                     break;
+                  }
+                }
+
+                // 移除逗号和空格
+                const cleanText = text.replace(/[,\s]/g, '');
+
+                // 尝试提取数字 + 单位的模式
+                const extractNumberWithUnit = (txt: string): number | null => {
+                  // 匹配数字+单位，或者数字+关注相关文本
+                  const match =
+                    txt.match(/(\d+(?:\.\d+)?)(K|M|B|千|万|亿)?/i) ||
+                    txt.match(/(\d+(?:\.\d+)?)(?=.*(?:following|Following|关注|正在关注))/i);
+
+                  if (match) {
+                    const number = parseFloat(match[1]);
+                    const unit = match[2]?.toUpperCase();
+
+                    switch (unit) {
+                      case 'K':
+                      case '千':
+                        return Math.round(number * 1000);
+                      case 'M':
+                      case '万':
+                        return Math.round(number * (unit === 'M' ? 1000000 : 10000));
+                      case 'B':
+                      case '亿':
+                        return Math.round(number * (unit === 'B' ? 1000000000 : 100000000));
+                      default:
+                        return Math.round(number);
+                    }
+                  }
+                  return null;
+                };
+
+                // 先尝试匹配完整的数字+单位
+                const fullMatch = extractNumberWithUnit(cleanText);
+                if (fullMatch !== null) {
+                  logs.push(`从文本 "${text}" 中提取到数字: ${fullMatch}`);
+                  result = fullMatch;
+                  break;
+                }
+
+                // 如果完整匹配失败，尝试在文本中查找数字
+                const numberMatches = cleanText.match(/\d+(?:\.\d+)?/g);
+                if (numberMatches && numberMatches.length > 0) {
+                  // 如果有多个数字，选择最可能是关注数的那个
+                  for (const numStr of numberMatches) {
+                    const num = parseFloat(numStr);
+                    // 关注数通常不会太小
+                    if (num >= 5) {
+                      logs.push(`从文本 "${text}" 中提取到数字: ${num}`);
+                      result = Math.round(num);
+                      break;
+                    }
                   }
                 }
               }
@@ -428,13 +487,72 @@ const getFollowingCountFromTwitter = async (
                   logs.push(`元素内容: "${text}"`);
 
                   if (text && /following/i.test(text)) {
-                    const matches = text.match(/\d+/g);
-                    if (matches && matches.length > 0) {
-                      const num = parseInt(matches[0], 10);
-                      if (!isNaN(num) && num > 0) {
-                        logs.push(`从文本 "${text}" 中提取到数字: ${num}`);
+                    logs.push(`正在解析包含following的文本: "${text}"`);
+
+                    // 移除逗号和空格，但先检查原始文本中是否有逗号分隔的数字
+                    const originalCommaMatch = text.match(/\d{1,3}(?:,\d{3})+/);
+                    if (originalCommaMatch) {
+                      // 如果找到了逗号分隔的数字，直接处理
+                      const numStr = originalCommaMatch[0].replace(/,/g, '');
+                      const num = parseInt(numStr, 10);
+                      if (!isNaN(num) && num >= 0) {
+                        logs.push(`从带逗号文本解析出数字: ${num}`);
                         result = num;
                         break;
+                      }
+                    }
+
+                    // 移除逗号和空格
+                    const cleanText = text.replace(/[,\s]/g, '');
+
+                    // 尝试提取数字 + 单位的模式
+                    const extractNumberWithUnit = (txt: string): number | null => {
+                      // 匹配数字+单位，或者数字+关注相关文本
+                      const match =
+                        txt.match(/(\d+(?:\.\d+)?)(K|M|B|千|万|亿)?/i) ||
+                        txt.match(/(\d+(?:\.\d+)?)(?=.*(?:following|Following|关注|正在关注))/i);
+
+                      if (match) {
+                        const number = parseFloat(match[1]);
+                        const unit = match[2]?.toUpperCase();
+
+                        switch (unit) {
+                          case 'K':
+                          case '千':
+                            return Math.round(number * 1000);
+                          case 'M':
+                          case '万':
+                            return Math.round(number * (unit === 'M' ? 1000000 : 10000));
+                          case 'B':
+                          case '亿':
+                            return Math.round(number * (unit === 'B' ? 1000000000 : 100000000));
+                          default:
+                            return Math.round(number);
+                        }
+                      }
+                      return null;
+                    };
+
+                    // 先尝试匹配完整的数字+单位
+                    const fullMatch = extractNumberWithUnit(cleanText);
+                    if (fullMatch !== null) {
+                      logs.push(`从文本 "${text}" 中提取到数字: ${fullMatch}`);
+                      result = fullMatch;
+                      break;
+                    }
+
+                    // 如果完整匹配失败，尝试在文本中查找数字
+                    const numberMatches = cleanText.match(/\d+(?:\.\d+)?/g);
+                    if (numberMatches && numberMatches.length > 0) {
+                      // 如果有多个数字，选择最可能是关注数的那个
+                      for (const numStr of numberMatches) {
+                        const num = parseFloat(numStr);
+                        // 关注数通常不会太小
+                        if (num >= 5) {
+                          logs.push(`从文本 "${text}" 中提取到数字: ${num}`);
+                          result = Math.round(num);
+                          break;
+                        }
                       }
                     }
                   }
@@ -734,12 +852,23 @@ const backupExtractFollowingCount = (): number => {
 
       const matches = text.match(/\d+/g);
       if (matches) {
-        matches.forEach(match => {
-          const num = parseInt(match, 10);
+        // 首先检查是否有带逗号的数字（如"5,311"）
+        const commaNumberMatch = text.match(/\d{1,3}(?:,\d{3})+/);
+        if (commaNumberMatch) {
+          const numStr = commaNumberMatch[0].replace(/,/g, ''); // 移除逗号
+          const num = parseInt(numStr, 10);
           if (!isNaN(num) && num > 0) {
             numberMatches.push(num);
           }
-        });
+        } else {
+          // 如果没有带逗号的数字，使用原来的逻辑
+          matches.forEach(match => {
+            const num = parseInt(match, 10);
+            if (!isNaN(num) && num > 0) {
+              numberMatches.push(num);
+            }
+          });
+        }
       }
     }
 
@@ -796,6 +925,18 @@ const parseFollowingCount = (text: string): number | null => {
   if (!isFollowingRelated && text.length > 20) {
     // 如果文本不相关且很长，跳过
     return null;
+  }
+
+  // 移除逗号和空格，但先检查原始文本中是否有逗号分隔的数字
+  const originalCommaMatch = text.match(/\d{1,3}(?:,\d{3})+/);
+  if (originalCommaMatch) {
+    // 如果找到了逗号分隔的数字，直接处理
+    const numStr = originalCommaMatch[0].replace(/,/g, '');
+    const num = parseInt(numStr, 10);
+    if (!isNaN(num) && num >= 0) {
+      console.log(`从带逗号文本解析出数字: ${num}`);
+      return num;
+    }
   }
 
   // 移除逗号和空格

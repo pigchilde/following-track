@@ -759,7 +759,7 @@ const SidePanel = () => {
                 <div>已处理: {stats.processed}</div>
                 <div>成功: {stats.successful}</div>
                 <div>失败: {stats.failed}</div>
-                <div>跳过: {stats.skipped}</div>
+                <div>无变化: {stats.skipped}</div>
                 <div>有变化: {stats.changed}</div>
                 <div>进度: {stats.total > 0 ? Math.round((stats.processed / stats.total) * 100) : 0}%</div>
                 <div>{isRetrying ? '重试模式' : '正常模式'}</div>
