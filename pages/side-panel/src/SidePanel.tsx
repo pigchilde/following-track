@@ -76,6 +76,15 @@ const SidePanel = () => {
 
   const operationIdRef = useRef<string | null>(null);
   const shouldStopRef = useRef(false);
+  // 添加一个ref来实时追踪统计数据，避免React状态更新延迟导致的显示问题
+  const statsRef = useRef<ProcessStats>({
+    total: 0,
+    processed: 0,
+    successful: 0,
+    failed: 0,
+    changed: 0,
+    skipped: 0,
+  });
 
   // 从本地存储加载之前的数据
   useEffect(() => {
@@ -360,6 +369,12 @@ const SidePanel = () => {
           saveFailedUser(user, error);
         }
         setStats(prev => ({ ...prev, processed: prev.processed + 1, failed: prev.failed + 1 }));
+        // 同时更新ref
+        statsRef.current = {
+          ...statsRef.current,
+          processed: statsRef.current.processed + 1,
+          failed: statsRef.current.failed + 1,
+        };
         setProgress(`用户 ${user.screenName} (ID: ${user.id}) 处理失败: ${error}`);
         return null;
       }
@@ -382,7 +397,12 @@ const SidePanel = () => {
       console.log(`- 不等比较 (!=): ${currentFollowingCount != userFollowingCount}`);
       console.log(`- 严格不等比较 (!==): ${currentFollowingCount !== userFollowingCount}`);
 
-      setStats(prev => ({ ...prev, processed: prev.processed + 1, successful: prev.successful + 1 }));
+      setStats(prev => ({ ...prev, processed: prev.processed + 1 }));
+      // 同时更新ref
+      statsRef.current = {
+        ...statsRef.current,
+        processed: statsRef.current.processed + 1,
+      };
 
       if (currentFollowingCount !== userFollowingCount) {
         console.log(`🔄 检测到关注数变化，准备调用 updateUser 函数...`);
@@ -404,7 +424,13 @@ const SidePanel = () => {
         // 记录有变化的用户
         const changeInfo = `${user.screenName} (ID: ${user.id}): ${userFollowingCount} → ${currentFollowingCount} (${newAdditions > 0 ? '+' : ''}${newAdditions})`;
 
-        setStats(prev => ({ ...prev, changed: prev.changed + 1 }));
+        setStats(prev => ({ ...prev, successful: prev.successful + 1, changed: prev.changed + 1 }));
+        // 同时更新ref
+        statsRef.current = {
+          ...statsRef.current,
+          successful: statsRef.current.successful + 1,
+          changed: statsRef.current.changed + 1,
+        };
 
         console.log(`用户 ${user.screenName} 关注数从 ${userFollowingCount} 变为 ${currentFollowingCount}`);
 
@@ -430,7 +456,13 @@ const SidePanel = () => {
           localStorage.setItem('failedTwitterUsers', JSON.stringify(updatedFailedUsers));
           setFailedUsers(updatedFailedUsers);
         }
-        setStats(prev => ({ ...prev, skipped: prev.skipped + 1 }));
+        setStats(prev => ({ ...prev, successful: prev.successful + 1, skipped: prev.skipped + 1 }));
+        // 同时更新ref
+        statsRef.current = {
+          ...statsRef.current,
+          successful: statsRef.current.successful + 1,
+          skipped: statsRef.current.skipped + 1,
+        };
       }
 
       return null;
@@ -449,6 +481,12 @@ const SidePanel = () => {
       }
 
       setStats(prev => ({ ...prev, processed: prev.processed + 1, failed: prev.failed + 1 }));
+      // 同时更新ref
+      statsRef.current = {
+        ...statsRef.current,
+        processed: statsRef.current.processed + 1,
+        failed: statsRef.current.failed + 1,
+      };
       setProgress(`处理 ${user.screenName} (ID: ${user.id}) 时出错: ${errorMsg}`);
 
       return null;
@@ -571,6 +609,8 @@ const SidePanel = () => {
     setProgress('正在获取用户列表...');
     setCurrentUser(null);
     setStats({ total: 0, processed: 0, successful: 0, failed: 0, changed: 0, skipped: 0 });
+    // 同时重置ref
+    statsRef.current = { total: 0, processed: 0, successful: 0, failed: 0, changed: 0, skipped: 0 };
 
     // 生成新的操作ID
     const newOperationId = generateOperationId();
@@ -589,6 +629,8 @@ const SidePanel = () => {
       const totalPages = Math.ceil(actualTotal / 10);
 
       setStats(prev => ({ ...prev, total: actualTotal }));
+      // 同时更新ref
+      statsRef.current = { ...statsRef.current, total: actualTotal };
       setProgress(
         `目标处理 ${targetNumber} 个用户，API总共有 ${apiTotal} 个用户，实际处理 ${actualTotal} 个用户，分 ${totalPages} 组处理...`,
       );
@@ -682,9 +724,13 @@ const SidePanel = () => {
         }
 
         const finalFailedCount = JSON.parse(localStorage.getItem('failedTwitterUsers') || '[]').length;
-        const completionMessage = `✅ 处理完成！共处理 ${stats.processed} 个用户，成功 ${stats.successful}，失败 ${stats.failed}，跳过 ${stats.skipped}，发现 ${allNewUsers.length} 个用户关注数有变化。${finalFailedCount > 0 ? `还有 ${finalFailedCount} 个用户处理失败。` : ''}`;
+
+        // 使用ref中的准确统计数据，避免React状态更新延迟
+        const finalStats = statsRef.current;
+        const completionMessage = `✅ 处理完成！共处理 ${finalStats.processed} 个用户，成功 ${finalStats.successful}，失败 ${finalStats.failed}，无变化 ${finalStats.skipped}，发现 ${allNewUsers.length} 个用户关注数有变化。${finalFailedCount > 0 ? `还有 ${finalFailedCount} 个用户处理失败。` : ''}`;
         setProgress(completionMessage);
         console.log(completionMessage);
+        console.log('最终统计详情:', finalStats);
       }
     } catch (error) {
       console.error('更新关注数时出错:', error);
