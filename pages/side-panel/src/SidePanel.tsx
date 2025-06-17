@@ -60,6 +60,10 @@ const SidePanel = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [isRetrying, setIsRetrying] = useState(false);
+  const [isContinuousMode, setIsContinuousMode] = useState(false);
+  const [currentRound, setCurrentRound] = useState(1);
+  const [roundInterval, setRoundInterval] = useState('30');
+  const [nextRoundCountdown, setNextRoundCountdown] = useState(0);
   const [progress, setProgress] = useState('');
   const [currentUser, setCurrentUser] = useState<{ screenName: string; id: number; name: string } | null>(null);
   const [newUsers, setNewUsers] = useState<string[]>([]);
@@ -76,7 +80,8 @@ const SidePanel = () => {
 
   const operationIdRef = useRef<string | null>(null);
   const shouldStopRef = useRef(false);
-  // 添加一个ref来实时追踪统计数据，避免React状态更新延迟导致的显示问题
+  const countdownTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const baseOperationIdRef = useRef<string | null>(null);
   const statsRef = useRef<ProcessStats>({
     total: 0,
     processed: 0,
@@ -86,7 +91,6 @@ const SidePanel = () => {
     skipped: 0,
   });
 
-  // 从本地存储加载之前的数据
   useEffect(() => {
     const savedUsers = localStorage.getItem('newTwitterUsers');
     if (savedUsers) {
@@ -98,28 +102,78 @@ const SidePanel = () => {
       setFailedUsers(JSON.parse(savedFailedUsers));
     }
 
-    // 加载保存的目标条数
     const savedTargetCount = localStorage.getItem('targetCount');
     if (savedTargetCount) {
       setTargetCount(savedTargetCount);
     }
+
+    const savedRoundInterval = localStorage.getItem('roundInterval');
+    if (savedRoundInterval) {
+      setRoundInterval(savedRoundInterval);
+    }
+
+    const savedContinuousMode = localStorage.getItem('continuousMode');
+    if (savedContinuousMode) {
+      setIsContinuousMode(JSON.parse(savedContinuousMode));
+    }
+
+    return () => {
+      if (countdownTimerRef.current) {
+        clearInterval(countdownTimerRef.current);
+      }
+    };
   }, []);
 
-  // 保存目标条数到本地存储
   useEffect(() => {
     if (targetCount.trim()) {
       localStorage.setItem('targetCount', targetCount);
     }
   }, [targetCount]);
 
-  // 生成唯一的操作ID
+  useEffect(() => {
+    if (roundInterval.trim()) {
+      localStorage.setItem('roundInterval', roundInterval);
+    }
+  }, [roundInterval]);
+
+  useEffect(() => {
+    localStorage.setItem('continuousMode', JSON.stringify(isContinuousMode));
+  }, [isContinuousMode]);
+
+  const startCountdown = (seconds: number) => {
+    setNextRoundCountdown(seconds);
+    if (countdownTimerRef.current) {
+      clearInterval(countdownTimerRef.current);
+    }
+
+    countdownTimerRef.current = setInterval(() => {
+      setNextRoundCountdown(prev => {
+        if (prev <= 1) {
+          if (countdownTimerRef.current) {
+            clearInterval(countdownTimerRef.current);
+            countdownTimerRef.current = null;
+          }
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  };
+
+  const stopCountdown = () => {
+    setNextRoundCountdown(0);
+    if (countdownTimerRef.current) {
+      clearInterval(countdownTimerRef.current);
+      countdownTimerRef.current = null;
+    }
+  };
+
   const generateOperationId = () => {
     const id = `operation_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     console.log(`生成新操作ID: ${id}`);
     return id;
   };
 
-  // 获取用户数据
   const fetchUsers = async (page: number = 1, size: number = 10): Promise<ApiResponse> => {
     const response = await fetch('http://127.0.0.1:7072/open/crawler/twitter_smart_user/page', {
       method: 'POST',
@@ -136,7 +190,6 @@ const SidePanel = () => {
     return await response.json();
   };
 
-  // 更新用户数据
   const updateUser = async (id: number, followingCount: number, newAdditions: number) => {
     console.log('updateUser', id, followingCount, newAdditions);
     const response = await fetch('http://127.0.0.1:7072/open/crawler/twitter_smart_user/update', {
@@ -154,7 +207,6 @@ const SidePanel = () => {
     return await response.json();
   };
 
-  // 向 background script 发送消息获取 Twitter 关注数
   const getFollowingCountFromTwitter = async (
     screenName: string,
     operationId: string,
@@ -178,7 +230,6 @@ const SidePanel = () => {
             reject(new Error(chrome.runtime.lastError.message));
           } else if (response && response.success) {
             console.log(`成功获取 ${screenName} 的关注数: ${response.count} (类型: ${typeof response.count})`);
-            // 确保返回的是数字类型
             const count = typeof response.count === 'number' ? response.count : parseInt(response.count, 10);
             if (isNaN(count)) {
               console.error(`关注数不是有效数字: ${response.count}`);
@@ -200,7 +251,6 @@ const SidePanel = () => {
     });
   };
 
-  // 保存失败的用户到本地存储
   const saveFailedUser = (user: TwitterUser, error: string) => {
     const failedUser: FailedUser = {
       id: user.id,
@@ -216,7 +266,6 @@ const SidePanel = () => {
     setFailedUsers(updatedFailedUsers);
   };
 
-  // 暂停操作
   const pauseOperation = async () => {
     if (!operationIdRef.current) {
       console.log('没有正在进行的操作，无法暂停');
@@ -249,7 +298,6 @@ const SidePanel = () => {
     }
   };
 
-  // 恢复操作
   const resumeOperation = async () => {
     if (!operationIdRef.current) {
       console.log('没有已暂停的操作，无法恢复');
@@ -282,13 +330,14 @@ const SidePanel = () => {
     }
   };
 
-  // 停止操作
   const stopOperation = async () => {
     console.log(`停止操作，操作ID: ${operationIdRef.current}`);
     shouldStopRef.current = true;
     setIsPaused(false);
     setIsLoading(false);
     setIsRetrying(false);
+    setIsContinuousMode(false);
+    stopCountdown();
 
     if (operationIdRef.current) {
       try {
@@ -315,11 +364,12 @@ const SidePanel = () => {
     }
 
     operationIdRef.current = null;
+    baseOperationIdRef.current = null;
     setProgress('操作已停止');
     setCurrentUser(null);
+    setCurrentRound(1);
   };
 
-  // 处理单个用户
   const processSingleUser = async (
     user: TwitterUser,
     operationId: string,
@@ -335,7 +385,6 @@ const SidePanel = () => {
       return null;
     }
 
-    // 检查是否暂停
     while (isPaused && !shouldStopRef.current) {
       console.log(`用户 ${user.screenName} 处理被暂停，等待恢复...`);
       await new Promise(resolve => setTimeout(resolve, 1000));
@@ -351,10 +400,8 @@ const SidePanel = () => {
       const modeText = isRetryMode ? '(重试)' : '';
       setProgress(`正在处理用户 ${user.screenName} (ID: ${user.id}) - ${user.name} ${modeText}`);
 
-      // 确保操作ID与当前操作ID一致
       if (operationIdRef.current !== operationId) {
         console.warn(`操作ID不匹配: 当前=${operationIdRef.current}, 请求=${operationId}`);
-        // 继续使用传入的操作ID
       }
 
       console.log(`获取 ${user.screenName} 的关注数...`);
@@ -362,14 +409,12 @@ const SidePanel = () => {
       console.log(`${user.screenName} 的关注数: ${currentFollowingCount} (类型: ${typeof currentFollowingCount})`);
 
       if (currentFollowingCount === -1) {
-        // 无法获取关注数，记录为失败
         const error = '无法获取关注数据';
         console.error(`用户 ${user.screenName} ${error}`);
         if (!isRetryMode) {
           saveFailedUser(user, error);
         }
         setStats(prev => ({ ...prev, processed: prev.processed + 1, failed: prev.failed + 1 }));
-        // 同时更新ref
         statsRef.current = {
           ...statsRef.current,
           processed: statsRef.current.processed + 1,
@@ -382,12 +427,10 @@ const SidePanel = () => {
       console.log(
         `用户 ${user.screenName} 关注数获取成功: ${currentFollowingCount}, 数据库中的关注数: ${user.followingCount}`,
       );
-      // 添加详细的数据类型和值比较调试信息
       console.log(`详细比较信息 - ${user.screenName}:`);
       console.log(`- currentFollowingCount: ${currentFollowingCount} (类型: ${typeof currentFollowingCount})`);
       console.log(`- user.followingCount: ${user.followingCount} (类型: ${typeof user.followingCount})`);
 
-      // 确保user.followingCount是数字类型，因为API可能返回字符串
       const userFollowingCount =
         typeof user.followingCount === 'number' ? user.followingCount : parseInt(String(user.followingCount), 10);
 
@@ -398,7 +441,6 @@ const SidePanel = () => {
       console.log(`- 严格不等比较 (!==): ${currentFollowingCount !== userFollowingCount}`);
 
       setStats(prev => ({ ...prev, processed: prev.processed + 1 }));
-      // 同时更新ref
       statsRef.current = {
         ...statsRef.current,
         processed: statsRef.current.processed + 1,
@@ -411,21 +453,17 @@ const SidePanel = () => {
           `用户 ${user.screenName} 关注数变化: ${userFollowingCount} → ${currentFollowingCount} (${newAdditions > 0 ? '+' : ''}${newAdditions})`,
         );
 
-        // 更新数据库
         try {
           console.log(`📞 正在调用 updateUser(${user.id}, ${currentFollowingCount}, ${newAdditions})...`);
           await updateUser(user.id, currentFollowingCount, newAdditions);
           console.log(`✅ 成功更新用户 ${user.screenName} 的数据库记录`);
         } catch (updateError) {
           console.error(`❌ 更新用户 ${user.screenName} 数据库记录失败:`, updateError);
-          // 即使数据库更新失败，我们仍然记录变化
         }
 
-        // 记录有变化的用户
         const changeInfo = `${user.screenName} (ID: ${user.id}): ${userFollowingCount} → ${currentFollowingCount} (${newAdditions > 0 ? '+' : ''}${newAdditions})`;
 
         setStats(prev => ({ ...prev, successful: prev.successful + 1, changed: prev.changed + 1 }));
-        // 同时更新ref
         statsRef.current = {
           ...statsRef.current,
           successful: statsRef.current.successful + 1,
@@ -434,7 +472,6 @@ const SidePanel = () => {
 
         console.log(`用户 ${user.screenName} 关注数从 ${userFollowingCount} 变为 ${currentFollowingCount}`);
 
-        // 如果是重试模式成功了，从失败列表中移除
         if (isRetryMode) {
           console.log(`重试成功，从失败列表中移除用户 ${user.screenName}`);
           const updatedFailedUsers = failedUsers.filter(u => u.id !== user.id);
@@ -449,7 +486,6 @@ const SidePanel = () => {
           `- 原因：currentFollowingCount (${currentFollowingCount}) === userFollowingCount (${userFollowingCount})`,
         );
         console.log(`用户 ${user.screenName} 关注数无变化: ${userFollowingCount}`);
-        // 如果是重试模式且数据没变化，也算成功，从失败列表中移除
         if (isRetryMode) {
           console.log(`重试成功(无变化)，从失败列表中移除用户 ${user.screenName}`);
           const updatedFailedUsers = failedUsers.filter(u => u.id !== user.id);
@@ -457,7 +493,6 @@ const SidePanel = () => {
           setFailedUsers(updatedFailedUsers);
         }
         setStats(prev => ({ ...prev, successful: prev.successful + 1, skipped: prev.skipped + 1 }));
-        // 同时更新ref
         statsRef.current = {
           ...statsRef.current,
           successful: statsRef.current.successful + 1,
@@ -468,7 +503,6 @@ const SidePanel = () => {
       return null;
     } catch (error) {
       if (error instanceof Error && error.message === 'PAUSED') {
-        // 如果是暂停，不计入失败
         console.log(`用户 ${user.screenName} 处理被暂停`);
         return null;
       }
@@ -481,7 +515,6 @@ const SidePanel = () => {
       }
 
       setStats(prev => ({ ...prev, processed: prev.processed + 1, failed: prev.failed + 1 }));
-      // 同时更新ref
       statsRef.current = {
         ...statsRef.current,
         processed: statsRef.current.processed + 1,
@@ -493,28 +526,35 @@ const SidePanel = () => {
     }
   };
 
-  // 处理用户组
-  const processUserGroup = async (users: TwitterUser[], operationId: string): Promise<string[]> => {
+  const processUserGroup = async (
+    users: TwitterUser[],
+    operationId: string,
+    shouldReuseTabForFirstUser: boolean = false,
+  ): Promise<string[]> => {
     const newUsersInGroup: string[] = [];
 
-    // 第一个用户不重用标签页，后续用户重用同一标签页
+    console.log(
+      `processUserGroup: 操作ID=${operationId}, 用户数量=${users.length}, 第一个用户是否复用标签页=${shouldReuseTabForFirstUser}`,
+    );
+
     for (let i = 0; i < users.length; i++) {
       if (shouldStopRef.current) break;
 
       const user = users[i];
       const isFirstUser = i === 0;
-      const reuseTab = !isFirstUser; // 第一个用户不重用，后续用户重用
+      // 如果是连续监听模式的新轮次，第一个用户也应该复用标签页
+      const reuseTab = shouldReuseTabForFirstUser ? true : !isFirstUser;
 
-      // 使用分组特定的操作ID，确保每个分组使用独立的标签页
+      console.log(
+        `处理用户 ${user.screenName} (${i + 1}/${users.length}): 是否第一个用户=${isFirstUser}, 是否复用标签页=${reuseTab}`,
+      );
+
       const result = await processSingleUser(user, operationId, false, reuseTab);
       if (result) {
         newUsersInGroup.push(result);
       }
 
-      // 如果不是最后一个用户且没有停止，则等待随机时间
       if (i < users.length - 1 && !shouldStopRef.current) {
-        // 生成20-30秒的随机等待时间
-        // const waitTime = Math.floor(Math.random() * (10 - 5 + 1) + 5) * 1000;
         const waitTime = Math.floor(Math.random() * (5 - 1 + 1) + 1) * 1000;
         console.log(`用户 ${user.screenName} 处理完成，等待 ${waitTime / 1000} 秒后处理下一个用户...`);
         setProgress(`用户 ${user.screenName} 处理完成，等待 ${waitTime / 1000} 秒后处理下一个用户...`);
@@ -525,7 +565,6 @@ const SidePanel = () => {
     return newUsersInGroup;
   };
 
-  // 重试失败的用户
   const retryFailedUsers = async () => {
     if (failedUsers.length === 0) {
       setProgress('没有需要重试的用户');
@@ -537,23 +576,35 @@ const SidePanel = () => {
 
     const retryResults: string[] = [];
 
-    // 为重试创建一个特定的操作ID
-    const retryOperationId = `${operationIdRef.current}-retry`;
+    let retryOperationId: string;
+    if (isContinuousMode && baseOperationIdRef.current) {
+      retryOperationId = `${baseOperationIdRef.current}-retry`;
+    } else {
+      retryOperationId = `${operationIdRef.current}-retry`;
+    }
 
-    // 失败用户也使用同一个标签页处理
+    console.log(
+      `retryFailedUsers: 重试操作ID=${retryOperationId}, 连续监听模式=${isContinuousMode}, 失败用户数量=${failedUsers.length}`,
+    );
+
     for (let i = 0; i < failedUsers.length; i++) {
       if (shouldStopRef.current) break;
 
       const failedUser = failedUsers[i];
       const isFirstUser = i === 0;
-      const reuseTab = !isFirstUser; // 第一个用户不重用，后续用户重用
+      // 在连续监听模式下，第一个重试用户也应该复用标签页
+      const reuseTab = isContinuousMode ? true : !isFirstUser;
+
+      console.log(
+        `重试用户 ${failedUser.screenName} (${i + 1}/${failedUsers.length}): 是否第一个用户=${isFirstUser}, 是否复用标签页=${reuseTab}`,
+      );
 
       // 构造用户对象
       const userForRetry: TwitterUser = {
         id: failedUser.id,
         screenName: failedUser.screenName,
         name: failedUser.name,
-        followingCount: 0, // 默认值，实际会被重新获取
+        followingCount: 0,
         createTime: '',
         updateTime: '',
         profileImageUrl: '',
@@ -573,9 +624,7 @@ const SidePanel = () => {
         retryResults.push(result);
       }
 
-      // 如果不是最后一个用户且没有停止，则等待随机时间
       if (i < failedUsers.length - 1 && !shouldStopRef.current) {
-        // 生成5-10秒的随机等待时间
         const waitTime = Math.floor(Math.random() * (10 - 5 + 1) + 5) * 1000;
         console.log(`失败用户 ${failedUser.screenName} 重试完成，等待 ${waitTime / 1000} 秒后处理下一个用户...`);
         setProgress(`失败用户 ${failedUser.screenName} 重试完成，等待 ${waitTime / 1000} 秒后处理下一个用户...`);
@@ -587,173 +636,241 @@ const SidePanel = () => {
     return retryResults;
   };
 
-  // 主要的更新关注数功能
-  const updateFollowingCounts = async () => {
-    if (isLoading) {
+  const updateFollowingCounts = async (isNewRound: boolean = false) => {
+    if (isLoading && !isNewRound) {
       console.log('已经有操作在进行中，请等待完成或停止当前操作');
       return;
     }
 
-    // 验证输入的目标条数
     const targetNumber = parseInt(targetCount.trim(), 10);
     if (!targetCount.trim() || isNaN(targetNumber) || targetNumber <= 0) {
       setProgress('❌ 请输入有效的处理条数（大于0的整数）');
       return;
     }
 
-    // 重置状态
+    if (isNewRound) {
+      stopCountdown();
+    }
+
     shouldStopRef.current = false;
     setIsLoading(true);
     setIsPaused(false);
     setIsRetrying(false);
-    setProgress('正在获取用户列表...');
+    if (!isNewRound) {
+      setCurrentRound(1);
+    }
+
+    const roundText = isContinuousMode ? `第 ${currentRound} 轮 - ` : '';
+    setProgress(`${roundText}正在获取用户列表...`);
     setCurrentUser(null);
     setStats({ total: 0, processed: 0, successful: 0, failed: 0, changed: 0, skipped: 0 });
-    // 同时重置ref
     statsRef.current = { total: 0, processed: 0, successful: 0, failed: 0, changed: 0, skipped: 0 };
 
-    // 生成新的操作ID
-    const newOperationId = generateOperationId();
+    let newOperationId: string;
+    if (isContinuousMode && baseOperationIdRef.current && isNewRound) {
+      newOperationId = baseOperationIdRef.current;
+      console.log(`连续监听模式第 ${currentRound} 轮，复用基础操作ID: ${newOperationId}`);
+    } else {
+      newOperationId = generateOperationId();
+      if (isContinuousMode) {
+        baseOperationIdRef.current = newOperationId;
+        console.log(`连续监听模式首轮，生成并保存基础操作ID: ${newOperationId}`);
+      }
+    }
     operationIdRef.current = newOperationId;
-    console.log(`开始新操作，操作ID: ${newOperationId}，目标处理条数: ${targetNumber}`);
+    console.log(`开始新操作，操作ID: ${newOperationId}，目标处理条数: ${targetNumber}，轮次: ${currentRound}`);
 
     try {
-      // 首先获取第一页数据以了解总数
-      console.log('正在获取第一页数据...');
-      const firstPageData = await fetchUsers(1, 10);
-      console.log('第一页数据获取成功:', firstPageData);
-      const apiTotal = firstPageData.data.pagination.total;
+      let processedFailedUsers = false;
+      if (failedUsers.length > 0 && !shouldStopRef.current) {
+        setProgress(`${roundText}优先重试 ${failedUsers.length} 个失败的用户...`);
+        console.log(`优先重试 ${failedUsers.length} 个失败的用户...`);
 
-      // 使用用户指定的条数和API返回的总数中的较小值
-      const actualTotal = Math.min(targetNumber, apiTotal);
-      const totalPages = Math.ceil(actualTotal / 10);
+        setStats(prev => ({ ...prev, total: failedUsers.length }));
+        statsRef.current = { ...statsRef.current, total: failedUsers.length };
 
-      setStats(prev => ({ ...prev, total: actualTotal }));
-      // 同时更新ref
-      statsRef.current = { ...statsRef.current, total: actualTotal };
-      setProgress(
-        `目标处理 ${targetNumber} 个用户，API总共有 ${apiTotal} 个用户，实际处理 ${actualTotal} 个用户，分 ${totalPages} 组处理...`,
-      );
-      console.log(
-        `目标处理 ${targetNumber} 个用户，API总共有 ${apiTotal} 个用户，实际处理 ${actualTotal} 个用户，分 ${totalPages} 组处理`,
-      );
+        const retryResults = await retryFailedUsers();
+        console.log(`失败用户重试完成，发现 ${retryResults.length} 个用户关注数有变化`);
 
-      const allNewUsers: string[] = [];
-
-      // 准备所有分组的数据
-      const groupPromises: Promise<string[]>[] = [];
-      const groupStats: { page: number; users: number }[] = [];
-      let processedCount = 0; // 追踪已处理的用户数
-
-      // 并行处理所有分组
-      for (let page = 1; page <= totalPages && !shouldStopRef.current && processedCount < actualTotal; page++) {
-        if (shouldStopRef.current) break;
-
-        // 创建一个异步函数来处理每个分组
-        const processGroup = async (pageNum: number): Promise<string[]> => {
-          setProgress(prev => `${prev}\n正在处理第 ${pageNum}/${totalPages} 组...`);
-          console.log(`开始处理第 ${pageNum}/${totalPages} 组...`);
-
-          // 获取当前分组的数据
-          const pageData = pageNum === 1 ? firstPageData : await fetchUsers(pageNum, 10);
-          let users = pageData.data.list;
-
-          // 如果这是最后一组，可能需要限制用户数量
-          const remainingCount = actualTotal - processedCount;
-          if (users.length > remainingCount) {
-            users = users.slice(0, remainingCount);
-          }
-
-          console.log(
-            `第 ${pageNum} 组有 ${users.length} 个用户（原始 ${pageData.data.list.length} 个，限制后 ${users.length} 个）`,
-          );
-          groupStats.push({ page: pageNum, users: users.length });
-          processedCount += users.length;
-
-          if (users.length > 0) {
-            console.log(`开始处理第 ${pageNum} 组的 ${users.length} 个用户...`);
-            // 为每个分组创建一个唯一的操作ID，以便区分不同分组的操作
-            const groupOperationId = `${operationIdRef.current}-group-${pageNum}`;
-            const newUsersInGroup = await processUserGroup(users, groupOperationId);
-            console.log(`第 ${pageNum} 组处理完成，发现 ${newUsersInGroup.length} 个用户关注数有变化`);
-            return newUsersInGroup;
-          }
-
-          return [];
-        };
-
-        // 将每个分组的处理添加到Promise数组中
-        groupPromises.push(processGroup(page));
-
-        // 短暂延迟启动下一个分组，避免同时打开太多标签页
-        if (page < totalPages && !shouldStopRef.current && processedCount < actualTotal) {
-          await new Promise(resolve => setTimeout(resolve, 2000));
-        }
-      }
-
-      // 等待所有分组处理完成
-      console.log(`等待 ${groupPromises.length} 个分组并行处理完成...`);
-      setProgress(prev => `${prev}\n等待 ${groupPromises.length} 个分组并行处理完成...`);
-
-      const results = await Promise.all(groupPromises);
-
-      // 合并所有分组的结果
-      results.forEach(groupResult => {
-        allNewUsers.push(...groupResult);
-      });
-
-      console.log(`所有分组处理完成，分组情况: ${JSON.stringify(groupStats)}`);
-
-      if (!shouldStopRef.current) {
-        // 尝试重试失败的用户
-        if (failedUsers.length > 0) {
-          setProgress(`正在重试 ${failedUsers.length} 个失败的用户...`);
-          console.log(`正在重试 ${failedUsers.length} 个失败的用户...`);
-          const retryResults = await retryFailedUsers();
-          console.log(`重试完成，发现 ${retryResults.length} 个用户关注数有变化`);
-          allNewUsers.push(...retryResults);
-        }
-
-        // 保存到本地存储
-        if (allNewUsers.length > 0) {
-          console.log(`共发现 ${allNewUsers.length} 个用户关注数有变化，保存到本地存储`);
+        if (retryResults.length > 0) {
           const existingUsers = JSON.parse(localStorage.getItem('newTwitterUsers') || '[]');
-          const updatedUsers = [...allNewUsers, ...existingUsers]; // 新的放在前面
+          const updatedUsers = [...retryResults, ...existingUsers];
           localStorage.setItem('newTwitterUsers', JSON.stringify(updatedUsers));
           setNewUsers(updatedUsers);
         }
 
+        processedFailedUsers = true;
+      }
+
+      if (!shouldStopRef.current) {
+        console.log('正在获取第一页数据...');
+        const firstPageData = await fetchUsers(1, 10);
+        console.log('第一页数据获取成功:', firstPageData);
+        const apiTotal = firstPageData.data.pagination.total;
+
+        const actualTotal = Math.min(targetNumber, apiTotal);
+        const totalPages = Math.ceil(actualTotal / 10);
+
+        const baseStats = processedFailedUsers
+          ? statsRef.current
+          : { total: 0, processed: 0, successful: 0, failed: 0, changed: 0, skipped: 0 };
+        setStats(prev => ({ ...prev, total: baseStats.total + actualTotal }));
+        statsRef.current = { ...statsRef.current, total: baseStats.total + actualTotal };
+
+        setProgress(
+          `${roundText}目标处理 ${targetNumber} 个用户，API总共有 ${apiTotal} 个用户，实际处理 ${actualTotal} 个用户，分 ${totalPages} 组处理...`,
+        );
+        console.log(
+          `目标处理 ${targetNumber} 个用户，API总共有 ${apiTotal} 个用户，实际处理 ${actualTotal} 个用户，分 ${totalPages} 组处理`,
+        );
+
+        const allNewUsers: string[] = [];
+
+        const groupPromises: Promise<string[]>[] = [];
+        const groupStats: { page: number; users: number }[] = [];
+        let processedCount = 0;
+
+        for (let page = 1; page <= totalPages && !shouldStopRef.current && processedCount < actualTotal; page++) {
+          if (shouldStopRef.current) break;
+
+          const processGroup = async (pageNum: number): Promise<string[]> => {
+            setProgress(prev => `${prev}\n${roundText}正在处理第 ${pageNum}/${totalPages} 组...`);
+            console.log(`开始处理第 ${pageNum}/${totalPages} 组...`);
+
+            const pageData = pageNum === 1 ? firstPageData : await fetchUsers(pageNum, 10);
+            let users = pageData.data.list;
+
+            const remainingCount = actualTotal - processedCount;
+            if (users.length > remainingCount) {
+              users = users.slice(0, remainingCount);
+            }
+
+            console.log(
+              `第 ${pageNum} 组有 ${users.length} 个用户（原始 ${pageData.data.list.length} 个，限制后 ${users.length} 个）`,
+            );
+            groupStats.push({ page: pageNum, users: users.length });
+            processedCount += users.length;
+
+            if (users.length > 0) {
+              console.log(`开始处理第 ${pageNum} 组的 ${users.length} 个用户...`);
+              const groupOperationId = `${operationIdRef.current}-group-${pageNum}`;
+              console.log(`第 ${pageNum} 组使用操作ID: ${groupOperationId}，基础操作ID: ${baseOperationIdRef.current}`);
+              // 在连续监听模式的新轮次中，允许第一个用户复用标签页
+              const shouldReuseTabForFirstUser = isContinuousMode && isNewRound;
+              console.log(
+                `第 ${pageNum} 组标签页复用判断: isContinuousMode=${isContinuousMode}, isNewRound=${isNewRound}, shouldReuseTabForFirstUser=${shouldReuseTabForFirstUser}`,
+              );
+              const newUsersInGroup = await processUserGroup(users, groupOperationId, shouldReuseTabForFirstUser);
+              console.log(`第 ${pageNum} 组处理完成，发现 ${newUsersInGroup.length} 个用户关注数有变化`);
+              return newUsersInGroup;
+            }
+
+            return [];
+          };
+
+          groupPromises.push(processGroup(page));
+
+          if (page < totalPages && !shouldStopRef.current && processedCount < actualTotal) {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          }
+        }
+
+        console.log(`等待 ${groupPromises.length} 个分组并行处理完成...`);
+        setProgress(prev => `${prev}\n${roundText}等待 ${groupPromises.length} 个分组并行处理完成...`);
+
+        const results = await Promise.all(groupPromises);
+
+        results.forEach(groupResult => {
+          allNewUsers.push(...groupResult);
+        });
+
+        console.log(`所有分组处理完成，分组情况: ${JSON.stringify(groupStats)}`);
+
+        if (allNewUsers.length > 0) {
+          console.log(`共发现 ${allNewUsers.length} 个用户关注数有变化，保存到本地存储`);
+          const existingUsers = JSON.parse(localStorage.getItem('newTwitterUsers') || '[]');
+          const updatedUsers = [...allNewUsers, ...existingUsers];
+          localStorage.setItem('newTwitterUsers', JSON.stringify(updatedUsers));
+          setNewUsers(updatedUsers);
+        }
+      }
+
+      if (!shouldStopRef.current) {
         const finalFailedCount = JSON.parse(localStorage.getItem('failedTwitterUsers') || '[]').length;
 
-        // 使用ref中的准确统计数据，避免React状态更新延迟
         const finalStats = statsRef.current;
-        const completionMessage = `✅ 处理完成！共处理 ${finalStats.processed} 个用户，成功 ${finalStats.successful}，失败 ${finalStats.failed}，无变化 ${finalStats.skipped}，发现 ${allNewUsers.length} 个用户关注数有变化。${finalFailedCount > 0 ? `还有 ${finalFailedCount} 个用户处理失败。` : ''}`;
+        const completionMessage = `✅ 第 ${currentRound} 轮处理完成！共处理 ${finalStats.processed} 个用户，成功 ${finalStats.successful}，失败 ${finalStats.failed}，无变化 ${finalStats.skipped}，发现 ${finalStats.changed} 个用户关注数有变化。${finalFailedCount > 0 ? `还有 ${finalFailedCount} 个用户处理失败。` : ''}`;
         setProgress(completionMessage);
         console.log(completionMessage);
         console.log('最终统计详情:', finalStats);
+
+        if (isContinuousMode && !shouldStopRef.current) {
+          const intervalSeconds = parseInt(roundInterval, 10);
+          if (isNaN(intervalSeconds) || intervalSeconds <= 0) {
+            setProgress(`${completionMessage}\n❌ 无效的轮次间隔时间，停止连续监听`);
+            setIsContinuousMode(false);
+          } else {
+            setProgress(
+              `${completionMessage}\n⏰ 连续监听模式已启用，${intervalSeconds} 秒后开始第 ${currentRound + 1} 轮`,
+            );
+
+            startCountdown(intervalSeconds);
+
+            setTimeout(async () => {
+              if (!shouldStopRef.current && isContinuousMode) {
+                console.log(`⏰ 定时器触发，准备开始第 ${currentRound + 1} 轮`);
+                setCurrentRound(prev => {
+                  const newRound = prev + 1;
+                  console.log(`🔄 轮次更新: ${prev} → ${newRound}`);
+                  return newRound;
+                });
+                await updateFollowingCounts(true);
+              }
+            }, intervalSeconds * 1000);
+          }
+        }
       }
     } catch (error) {
       console.error('更新关注数时出错:', error);
-      const errorMessage = `❌ 错误: ${error instanceof Error ? error.message : '未知错误'}`;
+      const errorMessage = `❌ 第 ${currentRound} 轮错误: ${error instanceof Error ? error.message : '未知错误'}`;
       setProgress(errorMessage);
       console.error(errorMessage);
+
+      if (isContinuousMode && !shouldStopRef.current) {
+        setProgress(prev => `${prev}\n⚠️ 将在 ${roundInterval} 秒后重试...`);
+        const intervalSeconds = parseInt(roundInterval, 10);
+        startCountdown(intervalSeconds);
+        setTimeout(async () => {
+          if (!shouldStopRef.current && isContinuousMode) {
+            console.log(`⚠️ 错误重试定时器触发，重试第 ${currentRound} 轮`);
+            await updateFollowingCounts(true);
+          }
+        }, intervalSeconds * 1000);
+      }
     } finally {
-      console.log(`操作结束，操作ID: ${operationIdRef.current}`);
-      setIsLoading(false);
-      setIsPaused(false);
-      setIsRetrying(false);
-      setCurrentUser(null);
-      operationIdRef.current = null;
+      if (!isContinuousMode || shouldStopRef.current) {
+        console.log(`操作结束，操作ID: ${operationIdRef.current}`);
+        setIsLoading(false);
+        setIsPaused(false);
+        setIsRetrying(false);
+        setCurrentUser(null);
+        operationIdRef.current = null;
+        if (shouldStopRef.current) {
+          baseOperationIdRef.current = null;
+          setCurrentRound(1);
+        }
+      } else {
+        setCurrentUser(null);
+        console.log(`第 ${currentRound} 轮完成，保持基础操作ID: ${baseOperationIdRef.current}`);
+      }
     }
   };
 
-  // 清除本地存储的新用户记录
   const clearNewUsers = () => {
     localStorage.removeItem('newTwitterUsers');
     setNewUsers([]);
   };
 
-  // 清除失败用户记录
   const clearFailedUsers = () => {
     localStorage.removeItem('failedTwitterUsers');
     setFailedUsers([]);
@@ -765,7 +882,6 @@ const SidePanel = () => {
         <div className="mx-auto max-w-sm p-4">
           <h1 className="mb-4 text-center text-xl font-bold">Twitter 关注数更新工具</h1>
 
-          {/* 处理条数输入框 */}
           {!isLoading && !isRetrying && (
             <div className="mb-4">
               <label
@@ -793,7 +909,66 @@ const SidePanel = () => {
             </div>
           )}
 
-          {/* 统计信息 */}
+          {!isLoading && !isRetrying && (
+            <div className="mb-4">
+              <div className="mb-3">
+                <label className="flex items-center">
+                  <input
+                    type="checkbox"
+                    checked={isContinuousMode}
+                    onChange={e => setIsContinuousMode(e.target.checked)}
+                    className="mr-2"
+                  />
+                  <span className={cn('text-sm font-medium', isLight ? 'text-gray-700' : 'text-gray-300')}>
+                    启用连续监听模式
+                  </span>
+                </label>
+                <p className={cn('mt-1 text-xs', isLight ? 'text-gray-500' : 'text-gray-400')}>
+                  启用后将自动循环监听，失败用户优先处理
+                </p>
+              </div>
+
+              {isContinuousMode && (
+                <div>
+                  <label
+                    htmlFor="roundInterval"
+                    className={cn('mb-2 block text-sm font-medium', isLight ? 'text-gray-700' : 'text-gray-300')}>
+                    轮次间隔 (秒):
+                  </label>
+                  <input
+                    id="roundInterval"
+                    type="number"
+                    min="1"
+                    max="60"
+                    value={roundInterval}
+                    onChange={e => setRoundInterval(e.target.value)}
+                    placeholder="30"
+                    className={cn(
+                      'w-full rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2',
+                      isLight
+                        ? 'border-gray-300 bg-white text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:ring-blue-500'
+                        : 'border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-400 focus:border-blue-400 focus:ring-blue-400',
+                    )}
+                  />
+                  <p className={cn('mt-1 text-xs', isLight ? 'text-gray-500' : 'text-gray-400')}>
+                    每轮处理完成后等待的时间，建议30-60秒
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {isContinuousMode && isLoading && (
+            <div
+              className={cn(
+                'mb-4 rounded-lg border p-3 text-sm',
+                isLight ? 'border-purple-200 bg-purple-50' : 'border-purple-700 bg-purple-900/30',
+              )}>
+              <div className="font-semibold">🔄 连续监听模式 - 第 {currentRound} 轮</div>
+              {nextRoundCountdown > 0 && <div className="mt-1">⏰ 下一轮开始倒计时: {nextRoundCountdown}秒</div>}
+            </div>
+          )}
+
           {(isLoading || isRetrying) && (
             <div
               className={cn(
@@ -813,7 +988,6 @@ const SidePanel = () => {
             </div>
           )}
 
-          {/* 失败用户统计 */}
           {failedUsers.length > 0 && !isLoading && !isRetrying && (
             <div
               className={cn(
@@ -849,7 +1023,6 @@ const SidePanel = () => {
             </div>
           )}
 
-          {/* 当前处理用户信息 */}
           {currentUser && (
             <div
               className={cn(
@@ -864,21 +1037,30 @@ const SidePanel = () => {
           )}
 
           <div className="space-y-4">
-            {/* 控制按钮 */}
             <div className="flex gap-2">
               {!isLoading && !isRetrying ? (
                 <button
-                  onClick={updateFollowingCounts}
+                  onClick={() => updateFollowingCounts(false)}
                   disabled={
                     !targetCount.trim() ||
                     isNaN(parseInt(targetCount.trim(), 10)) ||
-                    parseInt(targetCount.trim(), 10) <= 0
+                    parseInt(targetCount.trim(), 10) <= 0 ||
+                    (isContinuousMode &&
+                      (!roundInterval.trim() ||
+                        isNaN(parseInt(roundInterval.trim(), 10)) ||
+                        parseInt(roundInterval.trim(), 10) <= 0 ||
+                        parseInt(roundInterval.trim(), 10) > 60))
                   }
                   className={cn(
                     'flex-1 rounded-lg px-4 py-3 font-bold shadow-lg transition-all duration-200',
                     !targetCount.trim() ||
                       isNaN(parseInt(targetCount.trim(), 10)) ||
-                      parseInt(targetCount.trim(), 10) <= 0
+                      parseInt(targetCount.trim(), 10) <= 0 ||
+                      (isContinuousMode &&
+                        (!roundInterval.trim() ||
+                          isNaN(parseInt(roundInterval.trim(), 10)) ||
+                          parseInt(roundInterval.trim(), 10) <= 0 ||
+                          parseInt(roundInterval.trim(), 10) > 60))
                       ? isLight
                         ? 'cursor-not-allowed bg-gray-300 text-gray-500'
                         : 'cursor-not-allowed bg-gray-600 text-gray-400'
@@ -886,7 +1068,7 @@ const SidePanel = () => {
                         ? 'transform bg-blue-500 text-white hover:scale-105 hover:bg-blue-600 hover:shadow-xl'
                         : 'transform bg-blue-600 text-white hover:scale-105 hover:bg-blue-700 hover:shadow-xl',
                   )}>
-                  🚀 开始更新关注数
+                  {isContinuousMode ? '🔄 开始连续监听' : '🚀 开始更新关注数'}
                 </button>
               ) : (
                 <>
@@ -925,7 +1107,6 @@ const SidePanel = () => {
               )}
             </div>
 
-            {/* 进度条 */}
             {(isLoading || isRetrying) && stats.total > 0 && (
               <div className="h-2 w-full rounded-full bg-gray-200">
                 <div
@@ -934,7 +1115,6 @@ const SidePanel = () => {
               </div>
             )}
 
-            {/* 状态信息 */}
             {progress && (
               <div
                 className={cn(
@@ -963,7 +1143,6 @@ const SidePanel = () => {
               </div>
             )}
 
-            {/* 结果显示 */}
             {newUsers.length > 0 && (
               <div
                 className={cn(
