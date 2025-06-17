@@ -73,6 +73,7 @@ const SidePanel = () => {
     changed: 0,
     skipped: 0,
   });
+  const [cycleCount, setCycleCount] = useState(0);
 
   const operationIdRef = useRef<string | null>(null);
   const shouldStopRef = useRef(false);
@@ -604,147 +605,206 @@ const SidePanel = () => {
     // 重置状态
     shouldStopRef.current = false;
     setIsLoading(true);
-    setIsPaused(false);
-    setIsRetrying(false);
-    setProgress('正在获取用户列表...');
-    setCurrentUser(null);
-    setStats({ total: 0, processed: 0, successful: 0, failed: 0, changed: 0, skipped: 0 });
-    // 同时重置ref
-    statsRef.current = { total: 0, processed: 0, successful: 0, failed: 0, changed: 0, skipped: 0 };
+    // setIsPaused(false); // Paused state should persist unless explicitly changed
+    // setIsRetrying(false); // Will be reset per cycle if needed
+    // setProgress('正在获取用户列表...'); // Will be set per cycle
+    // setCurrentUser(null); // Will be reset per cycle
+    // Stats will be reset per cycle
 
-    // 生成新的操作ID
+    // 生成新的操作ID - This should happen *before* the loop
     const newOperationId = generateOperationId();
     operationIdRef.current = newOperationId;
     console.log(`开始新操作，操作ID: ${newOperationId}，目标处理条数: ${targetNumber}`);
+    setCycleCount(0); // Initialize cycle count
 
-    try {
-      // 首先获取第一页数据以了解总数
-      console.log('正在获取第一页数据...');
-      const firstPageData = await fetchUsers(1, 10);
-      console.log('第一页数据获取成功:', firstPageData);
-      const apiTotal = firstPageData.data.pagination.total;
+    // Initialize stats before the loop for the first display
+    setStats({ total: 0, processed: 0, successful: 0, failed: 0, changed: 0, skipped: 0 });
+    statsRef.current = { total: 0, processed: 0, successful: 0, failed: 0, changed: 0, skipped: 0 };
 
-      // 使用用户指定的条数和API返回的总数中的较小值
-      const actualTotal = Math.min(targetNumber, apiTotal);
-      const totalPages = Math.ceil(actualTotal / 10);
-
-      setStats(prev => ({ ...prev, total: actualTotal }));
-      // 同时更新ref
-      statsRef.current = { ...statsRef.current, total: actualTotal };
-      setProgress(
-        `目标处理 ${targetNumber} 个用户，API总共有 ${apiTotal} 个用户，实际处理 ${actualTotal} 个用户，分 ${totalPages} 组处理...`,
-      );
-      console.log(
-        `目标处理 ${targetNumber} 个用户，API总共有 ${apiTotal} 个用户，实际处理 ${actualTotal} 个用户，分 ${totalPages} 组处理`,
-      );
-
-      const allNewUsers: string[] = [];
-
-      // 准备所有分组的数据
-      const groupPromises: Promise<string[]>[] = [];
-      const groupStats: { page: number; users: number }[] = [];
-      let processedCount = 0; // 追踪已处理的用户数
-
-      // 并行处理所有分组
-      for (let page = 1; page <= totalPages && !shouldStopRef.current && processedCount < actualTotal; page++) {
-        if (shouldStopRef.current) break;
-
-        // 创建一个异步函数来处理每个分组
-        const processGroup = async (pageNum: number): Promise<string[]> => {
-          setProgress(prev => `${prev}\n正在处理第 ${pageNum}/${totalPages} 组...`);
-          console.log(`开始处理第 ${pageNum}/${totalPages} 组...`);
-
-          // 获取当前分组的数据
-          const pageData = pageNum === 1 ? firstPageData : await fetchUsers(pageNum, 10);
-          let users = pageData.data.list;
-
-          // 如果这是最后一组，可能需要限制用户数量
-          const remainingCount = actualTotal - processedCount;
-          if (users.length > remainingCount) {
-            users = users.slice(0, remainingCount);
-          }
-
-          console.log(
-            `第 ${pageNum} 组有 ${users.length} 个用户（原始 ${pageData.data.list.length} 个，限制后 ${users.length} 个）`,
-          );
-          groupStats.push({ page: pageNum, users: users.length });
-          processedCount += users.length;
-
-          if (users.length > 0) {
-            console.log(`开始处理第 ${pageNum} 组的 ${users.length} 个用户...`);
-            // 为每个分组创建一个唯一的操作ID，以便区分不同分组的操作
-            const groupOperationId = `${operationIdRef.current}-group-${pageNum}`;
-            const newUsersInGroup = await processUserGroup(users, groupOperationId);
-            console.log(`第 ${pageNum} 组处理完成，发现 ${newUsersInGroup.length} 个用户关注数有变化`);
-            return newUsersInGroup;
-          }
-
-          return [];
-        };
-
-        // 将每个分组的处理添加到Promise数组中
-        groupPromises.push(processGroup(page));
-
-        // 短暂延迟启动下一个分组，避免同时打开太多标签页
-        if (page < totalPages && !shouldStopRef.current && processedCount < actualTotal) {
-          await new Promise(resolve => setTimeout(resolve, 2000));
-        }
-      }
-
-      // 等待所有分组处理完成
-      console.log(`等待 ${groupPromises.length} 个分组并行处理完成...`);
-      setProgress(prev => `${prev}\n等待 ${groupPromises.length} 个分组并行处理完成...`);
-
-      const results = await Promise.all(groupPromises);
-
-      // 合并所有分组的结果
-      results.forEach(groupResult => {
-        allNewUsers.push(...groupResult);
+    while (!shouldStopRef.current) {
+      let currentCycleNumber = 0;
+      setCycleCount(prevCount => {
+        currentCycleNumber = prevCount + 1;
+        return currentCycleNumber;
       });
+      // Allow state to update, though direct use of currentCycleNumber is safer for immediate messages
+      await new Promise(resolve => setTimeout(resolve, 0));
 
-      console.log(`所有分组处理完成，分组情况: ${JSON.stringify(groupStats)}`);
 
-      if (!shouldStopRef.current) {
-        // 尝试重试失败的用户
-        if (failedUsers.length > 0) {
-          setProgress(`正在重试 ${failedUsers.length} 个失败的用户...`);
-          console.log(`正在重试 ${failedUsers.length} 个失败的用户...`);
-          const retryResults = await retryFailedUsers();
-          console.log(`重试完成，发现 ${retryResults.length} 个用户关注数有变化`);
-          allNewUsers.push(...retryResults);
+      try {
+        setProgress(`Cycle ${currentCycleNumber}: 开始获取用户数据...`);
+        // 首先获取第一页数据以了解总数
+        console.log(`Cycle ${currentCycleNumber}: 正在获取第一页数据...`);
+        const firstPageData = await fetchUsers(1, 10);
+        console.log(`Cycle ${currentCycleNumber}: 第一页数据获取成功:`, firstPageData);
+        const apiTotal = firstPageData.data.pagination.total;
+
+        // 使用用户指定的条数和API返回的总数中的较小值
+        const actualTotal = Math.min(targetNumber, apiTotal);
+        const totalPages = Math.ceil(actualTotal / 10);
+
+        setStats(prev => ({ ...prev, total: actualTotal }));
+        // 同时更新ref
+        statsRef.current = { ...statsRef.current, total: actualTotal };
+        setProgress(
+          `Cycle ${currentCycleNumber}: 目标 ${targetNumber}, API 总数 ${apiTotal}, 本轮实际处理 ${actualTotal}, 分 ${totalPages} 组...`,
+        );
+        console.log(
+          `Cycle ${currentCycleNumber}: 目标处理 ${targetNumber} 个用户，API总共有 ${apiTotal} 个用户，实际处理 ${actualTotal} 个用户，分 ${totalPages} 组处理`,
+        );
+
+        const allNewUsers: string[] = [];
+
+        // 准备所有分组的数据
+        const groupPromises: Promise<string[]>[] = [];
+        const groupStats: { page: number; users: number }[] = [];
+        let processedCount = 0; // 追踪已处理的用户数
+
+        // 并行处理所有分组
+        for (let page = 1; page <= totalPages && !shouldStopRef.current && processedCount < actualTotal; page++) {
+          if (shouldStopRef.current) break;
+
+          // 创建一个异步函数来处理每个分组
+          const processGroup = async (pageNum: number): Promise<string[]> => {
+            setProgress(prev => `Cycle ${currentCycleNumber}: ${prev}\n正在处理第 ${pageNum}/${totalPages} 组...`);
+            console.log(`Cycle ${currentCycleNumber}: 开始处理第 ${pageNum}/${totalPages} 组...`);
+
+            // 获取当前分组的数据
+            const pageData = pageNum === 1 ? firstPageData : await fetchUsers(pageNum, 10);
+            let users = pageData.data.list;
+
+            // 如果这是最后一组，可能需要限制用户数量
+            const remainingCount = actualTotal - processedCount;
+            if (users.length > remainingCount) {
+              users = users.slice(0, remainingCount);
+            }
+
+            console.log(
+              `第 ${pageNum} 组有 ${users.length} 个用户（原始 ${pageData.data.list.length} 个，限制后 ${users.length} 个）`,
+            );
+            groupStats.push({ page: pageNum, users: users.length });
+            processedCount += users.length;
+
+            if (users.length > 0) {
+              console.log(`开始处理第 ${pageNum} 组的 ${users.length} 个用户...`);
+              // 为每个分组创建一个唯一的操作ID，以便区分不同分组的操作
+              const groupOperationId = `${operationIdRef.current}-group-${pageNum}`;
+              const newUsersInGroup = await processUserGroup(users, groupOperationId);
+              console.log(`第 ${pageNum} 组处理完成，发现 ${newUsersInGroup.length} 个用户关注数有变化`);
+              return newUsersInGroup;
+            }
+
+            return [];
+          };
+
+          // 将每个分组的处理添加到Promise数组中
+          groupPromises.push(processGroup(page));
+
+          // 短暂延迟启动下一个分组，避免同时打开太多标签页
+          if (page < totalPages && !shouldStopRef.current && processedCount < actualTotal) {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          }
         }
 
-        // 保存到本地存储
-        if (allNewUsers.length > 0) {
-          console.log(`共发现 ${allNewUsers.length} 个用户关注数有变化，保存到本地存储`);
-          const existingUsers = JSON.parse(localStorage.getItem('newTwitterUsers') || '[]');
-          const updatedUsers = [...allNewUsers, ...existingUsers]; // 新的放在前面
-          localStorage.setItem('newTwitterUsers', JSON.stringify(updatedUsers));
-          setNewUsers(updatedUsers);
+        // 等待所有分组处理完成
+        console.log(`等待 ${groupPromises.length} 个分组并行处理完成...`);
+        setProgress(prev => `${prev}\n等待 ${groupPromises.length} 个分组并行处理完成...`);
+
+        const results = await Promise.all(groupPromises);
+
+        // 合并所有分组的结果
+        results.forEach(groupResult => {
+          allNewUsers.push(...groupResult);
+        });
+
+        console.log(`所有分组处理完成，分组情况: ${JSON.stringify(groupStats)}`);
+
+        if (!shouldStopRef.current) {
+          // 尝试重试失败的用户
+          if (failedUsers.length > 0) {
+            setProgress(`Cycle ${currentCycleNumber}: 重试 ${failedUsers.length} 个失败用户...`);
+            console.log(`Cycle ${currentCycleNumber}: 正在重试 ${failedUsers.length} 个失败的用户...`);
+            const retryResults = await retryFailedUsers(); // retryFailedUsers might need currentCycleNumber for its own setProgress calls
+            console.log(`Cycle ${currentCycleNumber}: 重试完成，变化 ${retryResults.length} 个`);
+            allNewUsers.push(...retryResults);
+          }
+
+          // 保存到本地存储
+          if (allNewUsers.length > 0) {
+            console.log(`共发现 ${allNewUsers.length} 个用户关注数有变化，保存到本地存储`);
+            const existingUsers = JSON.parse(localStorage.getItem('newTwitterUsers') || '[]');
+            const updatedUsers = [...allNewUsers, ...existingUsers]; // 新的放在前面
+            localStorage.setItem('newTwitterUsers', JSON.stringify(updatedUsers));
+            setNewUsers(updatedUsers);
+          }
+
+          const finalFailedCount = JSON.parse(localStorage.getItem('failedTwitterUsers') || '[]').length;
+
+          // 使用ref中的准确统计数据，避免React状态更新延迟
+          const finalStats = statsRef.current;
+          const completionMessage = `✅ Cycle ${currentCycleNumber}: 处理完成！共处理 ${finalStats.processed} 个用户，成功 ${finalStats.successful}，失败 ${finalStats.failed}，无变化 ${finalStats.skipped}，发现 ${allNewUsers.length} 个用户关注数有变化。${finalFailedCount > 0 ? `还有 ${finalFailedCount} 个用户处理失败。` : ''}`;
+          setProgress(completionMessage);
+          console.log(completionMessage);
+          console.log(`Cycle ${currentCycleNumber}: 最终统计详情:`, finalStats);
         }
-
-        const finalFailedCount = JSON.parse(localStorage.getItem('failedTwitterUsers') || '[]').length;
-
-        // 使用ref中的准确统计数据，避免React状态更新延迟
-        const finalStats = statsRef.current;
-        const completionMessage = `✅ 处理完成！共处理 ${finalStats.processed} 个用户，成功 ${finalStats.successful}，失败 ${finalStats.failed}，无变化 ${finalStats.skipped}，发现 ${allNewUsers.length} 个用户关注数有变化。${finalFailedCount > 0 ? `还有 ${finalFailedCount} 个用户处理失败。` : ''}`;
-        setProgress(completionMessage);
-        console.log(completionMessage);
-        console.log('最终统计详情:', finalStats);
+      } catch (error) {
+        console.error(`Cycle ${currentCycleNumber}: 更新关注数时出错:`, error);
+        const errorMessage = `❌ Cycle ${currentCycleNumber} 错误: ${error instanceof Error ? error.message : '未知错误'}`;
+        setProgress(errorMessage);
+        console.error(errorMessage);
+      } finally {
+        console.log(`Cycle ${currentCycleNumber}: 操作结束，操作ID: ${operationIdRef.current}`);
+        setCurrentUser(null);
       }
-    } catch (error) {
-      console.error('更新关注数时出错:', error);
-      const errorMessage = `❌ 错误: ${error instanceof Error ? error.message : '未知错误'}`;
-      setProgress(errorMessage);
-      console.error(errorMessage);
-    } finally {
-      console.log(`操作结束，操作ID: ${operationIdRef.current}`);
-      setIsLoading(false);
-      setIsPaused(false);
-      setIsRetrying(false);
-      setCurrentUser(null);
-      operationIdRef.current = null;
+      // Inter-cycle delay, pause check, and state resets
+      if (!shouldStopRef.current) {
+        const completedCycleNo = currentCycleNumber; // Capture for messages
+        // Honor pause state: if a cycle completes while paused, wait until resumed.
+        while (isPaused && !shouldStopRef.current) {
+          setProgress(`Cycle ${completedCycleNo} 完成。操作已暂停。等待恢复才能开始下一周期...`);
+          console.log(`Cycle ${completedCycleNo} 完成。操作已暂停。等待恢复才能开始下一周期...`);
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+
+        if (shouldStopRef.current) {
+          console.log('操作在周期切换时停止。');
+        } else {
+          const nextCycleNo = completedCycleNo + 1;
+          setProgress(`Cycle ${completedCycleNo} 处理完毕。等待 5 秒后开始 Cycle ${nextCycleNo}...`);
+          await new Promise(resolve => setTimeout(resolve, 5000));
+
+          // Reset per-cycle states for the next iteration (these are already done at start of loop by now)
+          console.log(`准备开始 Cycle ${nextCycleNo}：重置状态...`);
+          setNewUsers([]);
+          setFailedUsers([]);
+          setCurrentUser(null);
+          setIsRetrying(false);
+
+          setStats({ total: 0, processed: 0, successful: 0, failed: 0, changed: 0, skipped: 0 });
+          statsRef.current = { total: 0, processed: 0, successful: 0, failed: 0, changed: 0, skipped: 0 };
+          // cycleCount is incremented at the start of the while loop.
+          // setProgress(`Cycle ${nextCycleNo}: 新周期即将开始...`); // This will be set at the start of the next iteration.
+        }
+      }
+    } // End of while (!shouldStopRef.current)
+
+    // Cleanup that happens only when the entire operation is stopped or completed
+    console.log(`总操作已结束或外部停止，操作ID: ${operationIdRef.current}`);
+    setIsLoading(false);
+    setIsPaused(false); // Reset pause state on final stop
+    setIsRetrying(false);
+    // setCurrentUser(null); // This is now reset per-cycle or by stopOperation
+    if (operationIdRef.current) {
+        operationIdRef.current = null;
     }
+    // Set final progress message
+    if (shouldStopRef.current && progress !== '操作已停止') {
+        // If force stopped and stopOperation's message hasn't taken precedence
+        setProgress('操作已停止。');
+    } else if (!shouldStopRef.current) {
+        // If loop completed all its intended cycles (e.g. if there was a max cycle count)
+        setProgress('所有周期处理完成。');
+    } // Otherwise, keep the message from stopOperation or the last cycle message if loop broke early
   };
 
   // 清除本地存储的新用户记录
