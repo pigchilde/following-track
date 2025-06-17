@@ -515,7 +515,7 @@ const SidePanel = () => {
       if (i < users.length - 1 && !shouldStopRef.current) {
         // 生成20-30秒的随机等待时间
         // const waitTime = Math.floor(Math.random() * (10 - 5 + 1) + 5) * 1000;
-        const waitTime = Math.floor(Math.random() * (20 - 10 + 1) + 10) * 1000;
+        const waitTime = Math.floor(Math.random() * (5 - 1 + 1) + 1) * 1000;
         console.log(`用户 ${user.screenName} 处理完成，等待 ${waitTime / 1000} 秒后处理下一个用户...`);
         setProgress(`用户 ${user.screenName} 处理完成，等待 ${waitTime / 1000} 秒后处理下一个用户...`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
