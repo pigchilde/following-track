@@ -391,6 +391,12 @@ const getFollowingCountFromTwitter = async (
                 // 尝试从文本中提取数字，正确处理带逗号的数字格式
                 logs.push(`正在解析文本: "${text}"`);
 
+                // 验证文本是否可能包含年份等错误数据
+                if (text.match(/20[2-3]\d/) && text.length < 10) {
+                  logs.push(`跳过可能的年份文本: "${text}"`);
+                  continue;
+                }
+
                 // 移除逗号和空格，但先检查原始文本中是否有逗号分隔的数字
                 const originalCommaMatch = text.match(/\d{1,3}(?:,\d{3})+/);
                 if (originalCommaMatch) {
@@ -398,6 +404,11 @@ const getFollowingCountFromTwitter = async (
                   const numStr = originalCommaMatch[0].replace(/,/g, '');
                   const num = parseInt(numStr, 10);
                   if (!isNaN(num) && num >= 0) {
+                    // 添加年份检查
+                    if (num >= 2020 && num <= 2030) {
+                      logs.push(`跳过可能的年份数字: ${num}`);
+                      continue;
+                    }
                     logs.push(`从带逗号文本解析出数字: ${num}`);
                     result = num;
                     break;
@@ -406,6 +417,12 @@ const getFollowingCountFromTwitter = async (
 
                 // 移除逗号和空格
                 const cleanText = text.replace(/[,\s]/g, '');
+
+                // 验证文本是否可能包含年份等错误数据
+                if (text.match(/20[2-3]\d/) && text.length < 10) {
+                  logs.push(`跳过可能的年份文本: "${text}"`);
+                  continue;
+                }
 
                 // 尝试提取数字 + 单位的模式
                 const extractNumberWithUnit = (txt: string): number | null => {
@@ -416,6 +433,13 @@ const getFollowingCountFromTwitter = async (
 
                   if (match) {
                     const number = parseFloat(match[1]);
+
+                    // 检查是否是年份
+                    if (number >= 2020 && number <= 2030 && !match[2]) {
+                      logs.push(`跳过可能的年份: ${number}`);
+                      return null;
+                    }
+
                     const unit = match[2]?.toUpperCase();
 
                     switch (unit) {
@@ -446,16 +470,22 @@ const getFollowingCountFromTwitter = async (
                 // 如果完整匹配失败，尝试在文本中查找数字
                 const numberMatches = cleanText.match(/\d+(?:\.\d+)?/g);
                 if (numberMatches && numberMatches.length > 0) {
+                  logs.push(`找到 ${numberMatches.length} 个数字: [${numberMatches.join(', ')}] 在文本: "${text}"`);
                   // 如果有多个数字，选择最可能是关注数的那个
                   for (const numStr of numberMatches) {
                     const num = parseFloat(numStr);
-                    // 关注数通常不会太小
-                    if (num >= 5) {
-                      logs.push(`从文本 "${text}" 中提取到数字: ${num}`);
+                    logs.push(`检查数字: ${num} (类型: ${typeof num})`);
+                    // 关注数通常不会太小，且排除年份
+                    if (num >= 5 && !(num >= 2020 && num <= 2030)) {
+                      logs.push(`✅ 接受数字: ${num} (非年份且大于等于5)`);
                       result = Math.round(num);
                       break;
+                    } else {
+                      logs.push(`❌ 拒绝数字: ${num} (原因: ${num < 5 ? '太小' : '可能是年份'})`);
                     }
                   }
+                  // 如果找到了有效数字，退出外层循环
+                  if (result !== -1) break;
                 }
               }
             }
@@ -505,6 +535,12 @@ const getFollowingCountFromTwitter = async (
                     // 移除逗号和空格
                     const cleanText = text.replace(/[,\s]/g, '');
 
+                    // 验证文本是否可能包含年份等错误数据
+                    if (text.match(/20[2-3]\d/) && text.length < 10) {
+                      logs.push(`跳过可能的年份文本: "${text}"`);
+                      continue;
+                    }
+
                     // 尝试提取数字 + 单位的模式
                     const extractNumberWithUnit = (txt: string): number | null => {
                       // 匹配数字+单位，或者数字+关注相关文本
@@ -514,6 +550,13 @@ const getFollowingCountFromTwitter = async (
 
                       if (match) {
                         const number = parseFloat(match[1]);
+
+                        // 检查是否是年份
+                        if (number >= 2020 && number <= 2030 && !match[2]) {
+                          logs.push(`跳过可能的年份: ${number}`);
+                          return null;
+                        }
+
                         const unit = match[2]?.toUpperCase();
 
                         switch (unit) {
@@ -547,8 +590,8 @@ const getFollowingCountFromTwitter = async (
                       // 如果有多个数字，选择最可能是关注数的那个
                       for (const numStr of numberMatches) {
                         const num = parseFloat(numStr);
-                        // 关注数通常不会太小
-                        if (num >= 5) {
+                        // 关注数通常不会太小，且排除年份
+                        if (num >= 5 && !(num >= 2020 && num <= 2030)) {
                           logs.push(`从文本 "${text}" 中提取到数字: ${num}`);
                           result = Math.round(num);
                           break;
@@ -622,6 +665,43 @@ const getFollowingCountFromTwitter = async (
 
       if (followingCount !== -1) {
         console.log(`成功获取 ${screenName} 的关注数: ${followingCount}`);
+
+        // 添加数据合理性验证
+        if (typeof followingCount !== 'number' || followingCount < 0 || followingCount > 100000) {
+          console.warn(`⚠️ 提取的关注数异常: ${followingCount}，类型: ${typeof followingCount}`);
+
+          // 增加重试计数
+          retryAttempts.set(key, currentRetry + 1);
+
+          if (currentRetry < 2) {
+            console.log(`数据异常，准备重试获取 ${screenName} 的关注数... (第 ${currentRetry + 1} 次重试)`);
+            await new Promise(resolve => setTimeout(resolve, 2000)); // 等待2秒
+            return await getFollowingCountFromTwitter(screenName, operationId, false); // 重试时创建新标签页
+          } else {
+            console.log(`数据异常且已达到最大重试次数，放弃获取 ${screenName} 的关注数`);
+            retryAttempts.delete(key);
+            return -1;
+          }
+        }
+
+        // 检查是否是可疑的年份数据
+        if (followingCount >= 2020 && followingCount <= 2030) {
+          console.warn(`⚠️ 提取的关注数疑似年份数据: ${followingCount}`);
+
+          // 增加重试计数
+          retryAttempts.set(key, currentRetry + 1);
+
+          if (currentRetry < 2) {
+            console.log(`疑似年份数据，准备重试获取 ${screenName} 的关注数... (第 ${currentRetry + 1} 次重试)`);
+            await new Promise(resolve => setTimeout(resolve, 2000)); // 等待2秒
+            return await getFollowingCountFromTwitter(screenName, operationId, false); // 重试时创建新标签页
+          } else {
+            console.log(`疑似年份数据且已达到最大重试次数，放弃获取 ${screenName} 的关注数`);
+            retryAttempts.delete(key);
+            return -1;
+          }
+        }
+
         retryAttempts.delete(key); // 成功时清除重试计数
         return followingCount;
       }
@@ -850,6 +930,12 @@ const backupExtractFollowingCount = (): number => {
       const text = el.textContent?.trim();
       if (!text) continue;
 
+      // 添加过滤条件，排除明显的年份、日期、时间等
+      if (isLikelyDateOrYear(text)) {
+        console.log(`跳过可能的日期/年份文本: "${text}"`);
+        continue;
+      }
+
       const matches = text.match(/\d+/g);
       if (matches) {
         // 首先检查是否有带逗号的数字（如"5,311"）
@@ -857,14 +943,14 @@ const backupExtractFollowingCount = (): number => {
         if (commaNumberMatch) {
           const numStr = commaNumberMatch[0].replace(/,/g, ''); // 移除逗号
           const num = parseInt(numStr, 10);
-          if (!isNaN(num) && num > 0) {
+          if (!isNaN(num) && num > 0 && !isLikelyWrongNumber(num)) {
             numberMatches.push(num);
           }
         } else {
           // 如果没有带逗号的数字，使用原来的逻辑
           matches.forEach(match => {
             const num = parseInt(match, 10);
-            if (!isNaN(num) && num > 0) {
+            if (!isNaN(num) && num > 0 && !isLikelyWrongNumber(num)) {
               numberMatches.push(num);
             }
           });
@@ -872,20 +958,23 @@ const backupExtractFollowingCount = (): number => {
       }
     }
 
-    console.log(`找到 ${numberMatches.length} 个数字: ${numberMatches.join(', ')}`);
+    console.log(`找到 ${numberMatches.length} 个有效数字: ${numberMatches.join(', ')}`);
 
     if (numberMatches.length > 0) {
-      // 假设关注数通常在几十到几千之间
-      const likelyFollowingCounts = numberMatches.filter(n => n >= 10 && n <= 10000);
+      // 假设关注数通常在几十到几万之间，但排除明显的年份
+      const likelyFollowingCounts = numberMatches.filter(n => n >= 10 && n <= 50000 && !isLikelyYear(n));
       if (likelyFollowingCounts.length > 0) {
         const result = likelyFollowingCounts[0];
         console.log(`备用方法2选择可能的关注数: ${result}`);
         return result;
       }
 
-      // 如果没有符合范围的数字，返回第一个数字
-      console.log(`备用方法2返回第一个数字: ${numberMatches[0]}`);
-      return numberMatches[0];
+      // 如果没有符合范围的数字，检查是否有非年份的数字
+      const nonYearNumbers = numberMatches.filter(n => !isLikelyYear(n));
+      if (nonYearNumbers.length > 0) {
+        console.log(`备用方法2返回第一个非年份数字: ${nonYearNumbers[0]}`);
+        return nonYearNumbers[0];
+      }
     }
 
     // 方法3: 尝试在页面源码中查找
@@ -894,7 +983,7 @@ const backupExtractFollowingCount = (): number => {
 
     if (followingMatch && followingMatch[1]) {
       const count = parseInt(followingMatch[1], 10);
-      if (!isNaN(count) && count >= 0) {
+      if (!isNaN(count) && count >= 0 && !isLikelyYear(count)) {
         console.log(`备用方法3从源码提取关注数: ${count}`);
         return count;
       }
@@ -906,6 +995,28 @@ const backupExtractFollowingCount = (): number => {
     console.error('备用提取方法出错:', error);
     return -1;
   }
+};
+
+// 新增：检查是否是可能的年份
+const isLikelyYear = (num: number): boolean => {
+  return num >= 2020 && num <= 2030; // 当前时间附近的年份
+};
+
+// 新增：检查是否是明显错误的数字
+const isLikelyWrongNumber = (num: number): boolean => {
+  // 排除年份、明显过大的数字等
+  return isLikelyYear(num) || num > 100000;
+};
+
+// 新增：检查文本是否包含日期或年份
+const isLikelyDateOrYear = (text: string): boolean => {
+  // 检查是否包含明显的日期格式或年份
+  return (
+    /20[2-3]\d/.test(text) || // 2020-2039年份
+    /\d{1,2}\/\d{1,2}\/\d{4}/.test(text) || // MM/DD/YYYY格式
+    /\d{4}-\d{1,2}-\d{1,2}/.test(text) || // YYYY-MM-DD格式
+    /Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec/i.test(text)
+  ); // 英文月份
 };
 
 // 解析关注数文本
@@ -927,13 +1038,19 @@ const parseFollowingCount = (text: string): number | null => {
     return null;
   }
 
+  // 验证文本是否可能包含年份等错误数据
+  if (text.match(/20[2-3]\d/) && text.length < 10) {
+    console.log(`跳过可能的年份文本: "${text}"`);
+    return null;
+  }
+
   // 移除逗号和空格，但先检查原始文本中是否有逗号分隔的数字
   const originalCommaMatch = text.match(/\d{1,3}(?:,\d{3})+/);
   if (originalCommaMatch) {
     // 如果找到了逗号分隔的数字，直接处理
     const numStr = originalCommaMatch[0].replace(/,/g, '');
     const num = parseInt(numStr, 10);
-    if (!isNaN(num) && num >= 0) {
+    if (!isNaN(num) && num >= 0 && !isLikelyYear(num)) {
       console.log(`从带逗号文本解析出数字: ${num}`);
       return num;
     }
@@ -951,6 +1068,13 @@ const parseFollowingCount = (text: string): number | null => {
 
     if (match) {
       const number = parseFloat(match[1]);
+
+      // 检查是否是年份
+      if (number >= 2020 && number <= 2030 && !match[2]) {
+        console.log(`跳过可能的年份: ${number}`);
+        return null;
+      }
+
       const unit = match[2]?.toUpperCase();
 
       switch (unit) {
@@ -982,13 +1106,16 @@ const parseFollowingCount = (text: string): number | null => {
     // 如果有多个数字，选择最可能是关注数的那个
     for (const numStr of numberMatches) {
       const num = parseFloat(numStr);
-      // 关注数通常不会太小
-      if (num >= 5) {
+      // 关注数通常不会太小，且排除年份
+      if (num >= 5 && !isLikelyYear(num)) {
         return Math.round(num);
       }
     }
-    // 如果没有找到合适的，返回第一个数字
-    return Math.round(parseFloat(numberMatches[0]));
+    // 如果没有找到合适的，且第一个数字不是年份，返回第一个数字
+    const firstNum = Math.round(parseFloat(numberMatches[0]));
+    if (!isLikelyYear(firstNum)) {
+      return firstNum;
+    }
   }
 
   return null;

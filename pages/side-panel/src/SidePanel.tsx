@@ -63,6 +63,7 @@ const SidePanel = () => {
   const [isContinuousMode, setIsContinuousMode] = useState(false);
   const [currentRound, setCurrentRound] = useState(1);
   const [roundInterval, setRoundInterval] = useState('30');
+  const [changeThreshold, setChangeThreshold] = useState('50');
   const [nextRoundCountdown, setNextRoundCountdown] = useState(0);
   const [progress, setProgress] = useState('');
   const [currentUser, setCurrentUser] = useState<{ screenName: string; id: number; name: string } | null>(null);
@@ -112,6 +113,11 @@ const SidePanel = () => {
       setRoundInterval(savedRoundInterval);
     }
 
+    const savedChangeThreshold = localStorage.getItem('changeThreshold');
+    if (savedChangeThreshold) {
+      setChangeThreshold(savedChangeThreshold);
+    }
+
     const savedContinuousMode = localStorage.getItem('continuousMode');
     if (savedContinuousMode) {
       setIsContinuousMode(JSON.parse(savedContinuousMode));
@@ -135,6 +141,12 @@ const SidePanel = () => {
       localStorage.setItem('roundInterval', roundInterval);
     }
   }, [roundInterval]);
+
+  useEffect(() => {
+    if (changeThreshold.trim()) {
+      localStorage.setItem('changeThreshold', changeThreshold);
+    }
+  }, [changeThreshold]);
 
   useEffect(() => {
     localStorage.setItem('continuousMode', JSON.stringify(isContinuousMode));
@@ -447,12 +459,144 @@ const SidePanel = () => {
       };
 
       if (currentFollowingCount !== userFollowingCount) {
-        console.log(`🔄 检测到关注数变化，准备调用 updateUser 函数...`);
+        console.log(`🔄 检测到关注数变化，准备验证变化幅度...`);
         const newAdditions = currentFollowingCount - userFollowingCount;
+        const changeAmount = Math.abs(newAdditions);
+
         console.log(
           `用户 ${user.screenName} 关注数变化: ${userFollowingCount} → ${currentFollowingCount} (${newAdditions > 0 ? '+' : ''}${newAdditions})`,
         );
+        console.log(`变化幅度: ${changeAmount} 人`);
 
+        // 检查变化幅度是否异常（超过阈值）
+        const threshold = parseInt(changeThreshold.trim(), 10) || 50;
+        // 如果关注数为0，则不进行验证
+        if (changeAmount > threshold && userFollowingCount !== 0) {
+          console.warn(`⚠️ 用户 ${user.screenName} 关注数变化幅度异常: ${changeAmount} 人，超过阈值 ${threshold} 人`);
+          console.log(`🔄 重新获取 ${user.screenName} 的关注数进行验证...`);
+
+          try {
+            // 等待3秒后重新获取
+            await new Promise(resolve => setTimeout(resolve, 3000));
+
+            // 重新获取关注数进行验证
+            const verifyFollowingCount = await getFollowingCountFromTwitter(user.screenName, operationId, true);
+            console.log(`${user.screenName} 验证关注数: ${verifyFollowingCount}`);
+
+            if (verifyFollowingCount === -1) {
+              const error = '验证时无法获取关注数据';
+              console.error(`用户 ${user.screenName} ${error}`);
+              if (!isRetryMode) {
+                saveFailedUser(user, error);
+              }
+              setStats(prev => ({ ...prev, processed: prev.processed + 1, failed: prev.failed + 1 }));
+              statsRef.current = {
+                ...statsRef.current,
+                processed: statsRef.current.processed + 1,
+                failed: statsRef.current.failed + 1,
+              };
+              setProgress(`用户 ${user.screenName} (ID: ${user.id}) 验证失败: ${error}`);
+              return null;
+            }
+
+            const verifyChangeAmount = Math.abs(verifyFollowingCount - userFollowingCount);
+            console.log(`验证后的变化幅度: ${verifyChangeAmount} 人`);
+
+            // 如果两次获取的结果一致，且变化幅度仍然很大
+            if (verifyFollowingCount === currentFollowingCount && verifyChangeAmount > threshold) {
+              console.warn(`❌ 用户 ${user.screenName} 两次获取结果一致但变化幅度仍然异常，标记为可疑数据`);
+              const error = `关注数变化异常: ${userFollowingCount} → ${currentFollowingCount} (变化${changeAmount}人)`;
+              if (!isRetryMode) {
+                saveFailedUser(user, error);
+              }
+              setStats(prev => ({ ...prev, processed: prev.processed + 1, failed: prev.failed + 1 }));
+              statsRef.current = {
+                ...statsRef.current,
+                processed: statsRef.current.processed + 1,
+                failed: statsRef.current.failed + 1,
+              };
+              setProgress(`用户 ${user.screenName} (ID: ${user.id}) 数据异常: ${error}`);
+              return null;
+            }
+
+            // 如果验证结果不同，使用验证结果
+            if (verifyFollowingCount !== currentFollowingCount) {
+              console.log(`🔄 验证结果不同，使用验证结果: ${currentFollowingCount} → ${verifyFollowingCount}`);
+              // 更新为验证后的结果
+              const finalFollowingCount = verifyFollowingCount;
+              const finalNewAdditions = finalFollowingCount - userFollowingCount;
+              const finalChangeAmount = Math.abs(finalNewAdditions);
+
+              // 如果验证后的变化幅度仍然过大
+              if (finalChangeAmount > threshold) {
+                console.warn(`❌ 用户 ${user.screenName} 验证后变化幅度仍然异常: ${finalChangeAmount} 人`);
+                const error = `验证后关注数变化仍异常: ${userFollowingCount} → ${finalFollowingCount} (变化${finalChangeAmount}人)`;
+                if (!isRetryMode) {
+                  saveFailedUser(user, error);
+                }
+                setStats(prev => ({ ...prev, processed: prev.processed + 1, failed: prev.failed + 1 }));
+                statsRef.current = {
+                  ...statsRef.current,
+                  processed: statsRef.current.processed + 1,
+                  failed: statsRef.current.failed + 1,
+                };
+                setProgress(`用户 ${user.screenName} (ID: ${user.id}) 验证后数据仍异常: ${error}`);
+                return null;
+              }
+
+              // 使用验证后的数据更新
+              try {
+                console.log(
+                  `📞 使用验证数据调用 updateUser(${user.id}, ${finalFollowingCount}, ${finalNewAdditions})...`,
+                );
+                await updateUser(user.id, finalFollowingCount, finalNewAdditions);
+                console.log(`✅ 成功更新用户 ${user.screenName} 的数据库记录(验证后)`);
+              } catch (updateError) {
+                console.error(`❌ 更新用户 ${user.screenName} 数据库记录失败:`, updateError);
+              }
+
+              const changeInfo = `${user.screenName} (ID: ${user.id}): ${userFollowingCount} → ${finalFollowingCount} (${finalNewAdditions > 0 ? '+' : ''}${finalNewAdditions}) [已验证]`;
+
+              setStats(prev => ({ ...prev, successful: prev.successful + 1, changed: prev.changed + 1 }));
+              statsRef.current = {
+                ...statsRef.current,
+                successful: statsRef.current.successful + 1,
+                changed: statsRef.current.changed + 1,
+              };
+
+              console.log(
+                `用户 ${user.screenName} 关注数从 ${userFollowingCount} 变为 ${finalFollowingCount} (已验证)`,
+              );
+
+              if (isRetryMode) {
+                console.log(`重试成功，从失败列表中移除用户 ${user.screenName}`);
+                const updatedFailedUsers = failedUsers.filter(u => u.id !== user.id);
+                localStorage.setItem('failedTwitterUsers', JSON.stringify(updatedFailedUsers));
+                setFailedUsers(updatedFailedUsers);
+              }
+
+              return changeInfo;
+            }
+
+            console.log(`✅ 验证成功，数据一致，变化幅度正常: ${verifyChangeAmount} 人`);
+          } catch (verifyError) {
+            console.error(`验证 ${user.screenName} 关注数时出错:`, verifyError);
+            const error = `验证关注数失败: ${verifyError instanceof Error ? verifyError.message : '未知错误'}`;
+            if (!isRetryMode) {
+              saveFailedUser(user, error);
+            }
+            setStats(prev => ({ ...prev, processed: prev.processed + 1, failed: prev.failed + 1 }));
+            statsRef.current = {
+              ...statsRef.current,
+              processed: statsRef.current.processed + 1,
+              failed: statsRef.current.failed + 1,
+            };
+            setProgress(`用户 ${user.screenName} (ID: ${user.id}) 验证失败: ${error}`);
+            return null;
+          }
+        }
+
+        // 正常更新数据库
         try {
           console.log(`📞 正在调用 updateUser(${user.id}, ${currentFollowingCount}, ${newAdditions})...`);
           await updateUser(user.id, currentFollowingCount, newAdditions);
@@ -958,6 +1102,34 @@ const SidePanel = () => {
             </div>
           )}
 
+          {!isLoading && !isRetrying && (
+            <div className="mb-4">
+              <label
+                htmlFor="changeThreshold"
+                className={cn('mb-2 block text-sm font-medium', isLight ? 'text-gray-700' : 'text-gray-300')}>
+                变化阈值 (人):
+              </label>
+              <input
+                id="changeThreshold"
+                type="number"
+                min="1"
+                max="500"
+                value={changeThreshold}
+                onChange={e => setChangeThreshold(e.target.value)}
+                placeholder="50"
+                className={cn(
+                  'w-full rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2',
+                  isLight
+                    ? 'border-gray-300 bg-white text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:ring-blue-500'
+                    : 'border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-400 focus:border-blue-400 focus:ring-blue-400',
+                )}
+              />
+              <p className={cn('mt-1 text-xs', isLight ? 'text-gray-500' : 'text-gray-400')}>
+                关注数变化超过此值时会触发二次验证，建议20-100
+              </p>
+            </div>
+          )}
+
           {isContinuousMode && isLoading && (
             <div
               className={cn(
@@ -1045,6 +1217,10 @@ const SidePanel = () => {
                     !targetCount.trim() ||
                     isNaN(parseInt(targetCount.trim(), 10)) ||
                     parseInt(targetCount.trim(), 10) <= 0 ||
+                    !changeThreshold.trim() ||
+                    isNaN(parseInt(changeThreshold.trim(), 10)) ||
+                    parseInt(changeThreshold.trim(), 10) <= 0 ||
+                    parseInt(changeThreshold.trim(), 10) > 500 ||
                     (isContinuousMode &&
                       (!roundInterval.trim() ||
                         isNaN(parseInt(roundInterval.trim(), 10)) ||

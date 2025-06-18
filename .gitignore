@@ -23,3 +23,6 @@ tsconfig.tsbuildinfo
 
 # compiled
 **/tailwind-output.css
+
+# YoYo AI version control directory
+.yoyo/
