@@ -70,6 +70,7 @@ const SidePanel = () => {
   const [newUsers, setNewUsers] = useState<string[]>([]);
   const [failedUsers, setFailedUsers] = useState<FailedUser[]>([]);
   const [targetCount, setTargetCount] = useState<string>('');
+  const [apiServerHost, setApiServerHost] = useState<string>('43.143.87.115:7072');
   const [stats, setStats] = useState<ProcessStats>({
     total: 0,
     processed: 0,
@@ -123,6 +124,11 @@ const SidePanel = () => {
       setIsContinuousMode(JSON.parse(savedContinuousMode));
     }
 
+    const savedApiServerHost = localStorage.getItem('apiServerHost');
+    if (savedApiServerHost) {
+      setApiServerHost(savedApiServerHost);
+    }
+
     return () => {
       if (countdownTimerRef.current) {
         clearInterval(countdownTimerRef.current);
@@ -151,6 +157,12 @@ const SidePanel = () => {
   useEffect(() => {
     localStorage.setItem('continuousMode', JSON.stringify(isContinuousMode));
   }, [isContinuousMode]);
+
+  useEffect(() => {
+    if (apiServerHost.trim()) {
+      localStorage.setItem('apiServerHost', apiServerHost);
+    }
+  }, [apiServerHost]);
 
   const startCountdown = (seconds: number) => {
     setNextRoundCountdown(seconds);
@@ -187,7 +199,7 @@ const SidePanel = () => {
   };
 
   const fetchUsers = async (page: number = 1, size: number = 10): Promise<ApiResponse> => {
-    const response = await fetch('http://127.0.0.1:7072/open/crawler/twitter_smart_user/page', {
+    const response = await fetch(`http://${apiServerHost}/open/crawler/twitter_smart_user/page`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -204,7 +216,7 @@ const SidePanel = () => {
 
   const updateUser = async (id: number, followingCount: number, newAdditions: number) => {
     console.log('updateUser', id, followingCount, newAdditions);
-    const response = await fetch('http://127.0.0.1:7072/open/crawler/twitter_smart_user/update', {
+    const response = await fetch(`http://${apiServerHost}/open/crawler/twitter_smart_user/update`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1029,6 +1041,32 @@ const SidePanel = () => {
           {!isLoading && !isRetrying && (
             <div className="mb-4">
               <label
+                htmlFor="apiServerHost"
+                className={cn('mb-2 block text-sm font-medium', isLight ? 'text-gray-700' : 'text-gray-300')}>
+                API服务器地址:
+              </label>
+              <input
+                id="apiServerHost"
+                type="text"
+                value={apiServerHost}
+                onChange={e => setApiServerHost(e.target.value)}
+                placeholder="请输入API服务器地址，如: 127.0.0.1:7072"
+                className={cn(
+                  'w-full rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2',
+                  isLight
+                    ? 'border-gray-300 bg-white text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:ring-blue-500'
+                    : 'border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-400 focus:border-blue-400 focus:ring-blue-400',
+                )}
+              />
+              <p className={cn('mt-1 text-xs', isLight ? 'text-gray-500' : 'text-gray-400')}>
+                格式: IP:端口 或 域名:端口，不包含http://前缀
+              </p>
+            </div>
+          )}
+
+          {!isLoading && !isRetrying && (
+            <div className="mb-4">
+              <label
                 htmlFor="targetCount"
                 className={cn('mb-2 block text-sm font-medium', isLight ? 'text-gray-700' : 'text-gray-300')}>
                 处理条数:
@@ -1221,6 +1259,7 @@ const SidePanel = () => {
                     isNaN(parseInt(changeThreshold.trim(), 10)) ||
                     parseInt(changeThreshold.trim(), 10) <= 0 ||
                     parseInt(changeThreshold.trim(), 10) > 500 ||
+                    !apiServerHost.trim() ||
                     (isContinuousMode &&
                       (!roundInterval.trim() ||
                         isNaN(parseInt(roundInterval.trim(), 10)) ||
@@ -1232,6 +1271,7 @@ const SidePanel = () => {
                     !targetCount.trim() ||
                       isNaN(parseInt(targetCount.trim(), 10)) ||
                       parseInt(targetCount.trim(), 10) <= 0 ||
+                      !apiServerHost.trim() ||
                       (isContinuousMode &&
                         (!roundInterval.trim() ||
                           isNaN(parseInt(roundInterval.trim(), 10)) ||
