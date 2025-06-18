@@ -71,6 +71,8 @@ const SidePanel = () => {
   const [failedUsers, setFailedUsers] = useState<FailedUser[]>([]);
   const [targetCount, setTargetCount] = useState<string>('');
   const [apiServerHost, setApiServerHost] = useState<string>('43.143.87.115:7072');
+  const [randomDelayMin, setRandomDelayMin] = useState<string>('10');
+  const [randomDelayMax, setRandomDelayMax] = useState<string>('20');
   const [stats, setStats] = useState<ProcessStats>({
     total: 0,
     processed: 0,
@@ -129,6 +131,16 @@ const SidePanel = () => {
       setApiServerHost(savedApiServerHost);
     }
 
+    const savedRandomDelayMin = localStorage.getItem('randomDelayMin');
+    if (savedRandomDelayMin) {
+      setRandomDelayMin(savedRandomDelayMin);
+    }
+
+    const savedRandomDelayMax = localStorage.getItem('randomDelayMax');
+    if (savedRandomDelayMax) {
+      setRandomDelayMax(savedRandomDelayMax);
+    }
+
     return () => {
       if (countdownTimerRef.current) {
         clearInterval(countdownTimerRef.current);
@@ -163,6 +175,18 @@ const SidePanel = () => {
       localStorage.setItem('apiServerHost', apiServerHost);
     }
   }, [apiServerHost]);
+
+  useEffect(() => {
+    if (randomDelayMin.trim()) {
+      localStorage.setItem('randomDelayMin', randomDelayMin);
+    }
+  }, [randomDelayMin]);
+
+  useEffect(() => {
+    if (randomDelayMax.trim()) {
+      localStorage.setItem('randomDelayMax', randomDelayMax);
+    }
+  }, [randomDelayMax]);
 
   const startCountdown = (seconds: number) => {
     setNextRoundCountdown(seconds);
@@ -711,7 +735,12 @@ const SidePanel = () => {
       }
 
       if (i < users.length - 1 && !shouldStopRef.current) {
-        const waitTime = Math.floor(Math.random() * (5 - 1 + 1) + 1) * 1000;
+        // 随机延迟
+        const waitTime =
+          Math.floor(
+            Math.random() * (parseInt(randomDelayMax, 10) - parseInt(randomDelayMin, 10) + 1) +
+              parseInt(randomDelayMin, 10),
+          ) * 1000;
         console.log(`用户 ${user.screenName} 处理完成，等待 ${waitTime / 1000} 秒后处理下一个用户...`);
         setProgress(`用户 ${user.screenName} 处理完成，等待 ${waitTime / 1000} 秒后处理下一个用户...`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
@@ -781,7 +810,11 @@ const SidePanel = () => {
       }
 
       if (i < failedUsers.length - 1 && !shouldStopRef.current) {
-        const waitTime = Math.floor(Math.random() * (10 - 5 + 1) + 5) * 1000;
+        const waitTime =
+          Math.floor(
+            Math.random() * (parseInt(randomDelayMax, 10) - parseInt(randomDelayMin, 10) + 1) +
+              parseInt(randomDelayMin, 10),
+          ) * 1000;
         console.log(`失败用户 ${failedUser.screenName} 重试完成，等待 ${waitTime / 1000} 秒后处理下一个用户...`);
         setProgress(`失败用户 ${failedUser.screenName} 重试完成，等待 ${waitTime / 1000} 秒后处理下一个用户...`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
@@ -1168,6 +1201,54 @@ const SidePanel = () => {
             </div>
           )}
 
+          {!isLoading && !isRetrying && (
+            <div className="mb-4">
+              <label className={cn('mb-2 block text-sm font-medium', isLight ? 'text-gray-700' : 'text-gray-300')}>
+                随机延迟时间 (秒):
+              </label>
+              <div className="flex gap-2">
+                <div className="flex-1">
+                  <input
+                    id="randomDelayMin"
+                    type="number"
+                    min="1"
+                    max="60"
+                    value={randomDelayMin}
+                    onChange={e => setRandomDelayMin(e.target.value)}
+                    placeholder="最小值"
+                    className={cn(
+                      'w-full rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2',
+                      isLight
+                        ? 'border-gray-300 bg-white text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:ring-blue-500'
+                        : 'border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-400 focus:border-blue-400 focus:ring-blue-400',
+                    )}
+                  />
+                </div>
+                <span className={cn('flex items-center text-sm', isLight ? 'text-gray-700' : 'text-gray-300')}>-</span>
+                <div className="flex-1">
+                  <input
+                    id="randomDelayMax"
+                    type="number"
+                    min="1"
+                    max="60"
+                    value={randomDelayMax}
+                    onChange={e => setRandomDelayMax(e.target.value)}
+                    placeholder="最大值"
+                    className={cn(
+                      'w-full rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2',
+                      isLight
+                        ? 'border-gray-300 bg-white text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:ring-blue-500'
+                        : 'border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-400 focus:border-blue-400 focus:ring-blue-400',
+                    )}
+                  />
+                </div>
+              </div>
+              <p className={cn('mt-1 text-xs', isLight ? 'text-gray-500' : 'text-gray-400')}>
+                处理每个用户后的随机等待时间，避免请求过于频繁
+              </p>
+            </div>
+          )}
+
           {isContinuousMode && isLoading && (
             <div
               className={cn(
@@ -1260,6 +1341,13 @@ const SidePanel = () => {
                     parseInt(changeThreshold.trim(), 10) <= 0 ||
                     parseInt(changeThreshold.trim(), 10) > 500 ||
                     !apiServerHost.trim() ||
+                    !randomDelayMin.trim() ||
+                    !randomDelayMax.trim() ||
+                    isNaN(parseInt(randomDelayMin.trim(), 10)) ||
+                    isNaN(parseInt(randomDelayMax.trim(), 10)) ||
+                    parseInt(randomDelayMin.trim(), 10) <= 0 ||
+                    parseInt(randomDelayMax.trim(), 10) <= 0 ||
+                    parseInt(randomDelayMin.trim(), 10) >= parseInt(randomDelayMax.trim(), 10) ||
                     (isContinuousMode &&
                       (!roundInterval.trim() ||
                         isNaN(parseInt(roundInterval.trim(), 10)) ||
@@ -1272,6 +1360,13 @@ const SidePanel = () => {
                       isNaN(parseInt(targetCount.trim(), 10)) ||
                       parseInt(targetCount.trim(), 10) <= 0 ||
                       !apiServerHost.trim() ||
+                      !randomDelayMin.trim() ||
+                      !randomDelayMax.trim() ||
+                      isNaN(parseInt(randomDelayMin.trim(), 10)) ||
+                      isNaN(parseInt(randomDelayMax.trim(), 10)) ||
+                      parseInt(randomDelayMin.trim(), 10) <= 0 ||
+                      parseInt(randomDelayMax.trim(), 10) <= 0 ||
+                      parseInt(randomDelayMin.trim(), 10) >= parseInt(randomDelayMax.trim(), 10) ||
                       (isContinuousMode &&
                         (!roundInterval.trim() ||
                           isNaN(parseInt(roundInterval.trim(), 10)) ||
