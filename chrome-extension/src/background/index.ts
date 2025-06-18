@@ -247,6 +247,10 @@ const getFollowingCountFromTwitter = async (
 
     console.log(`标签页 ${tabId} 准备抓取数据...`);
 
+    // 额外等待确保页面完全渲染
+    console.log('等待额外时间确保页面完全渲染...');
+    await new Promise(resolve => setTimeout(resolve, 1000));
+
     // 注入内容脚本并获取关注数
     let results;
     try {
@@ -366,11 +370,54 @@ const getFollowingCountFromTwitter = async (
           logs.push(`页面URL: ${window.location.href}`);
           logs.push(`页面加载状态: ${document.readyState}`);
 
-          // 简化的提取逻辑，先尝试最常见的选择器
+          // 检查页面是否可能出现错误
+          const errorElements = document.querySelectorAll('[data-testid="error"]');
+          if (errorElements.length > 0) {
+            logs.push(`⚠️ 页面包含错误元素: ${errorElements.length} 个`);
+          }
+
+          // 检查是否为私人账户
+          const privateAccountElements = document.querySelectorAll('[data-testid="privateAccountPrompt"]');
+          if (privateAccountElements.length > 0) {
+            logs.push(`⚠️ 检测到私人账户提示`);
+          }
+
+          // 统计页面上所有包含数字的元素
+          const allElementsWithNumbers = Array.from(document.querySelectorAll('*')).filter(el => {
+            const text = el.textContent?.trim();
+            return text && /\d/.test(text) && text.length < 50;
+          });
+          logs.push(`页面上包含数字的元素总数: ${allElementsWithNumbers.length}`);
+
+          // 记录页面上所有可能相关的文本
+          const followingRelatedTexts: string[] = [];
+          allElementsWithNumbers.forEach(el => {
+            const text = el.textContent?.trim();
+            if (
+              text &&
+              (text.toLowerCase().includes('following') || /\d+[,\.]?\d*\s*(K|M|B)?\s*following/i.test(text))
+            ) {
+              followingRelatedTexts.push(text);
+            }
+          });
+          logs.push(`找到包含following的文本: [${followingRelatedTexts.join(', ')}]`);
+
+          // 增强的提取逻辑，使用更多选择器
           const selectors = [
-            'a[href$="/following"] span',
+            // Twitter官方选择器
             '[data-testid="UserFollowing-Count"]',
+            'a[href$="/following"] span',
             'a[href*="/following"] span',
+            // 通用following相关选择器
+            'a[href*="following"] *',
+            '[data-testid*="Following"] *',
+            '[aria-label*="following" i] *',
+            '[aria-label*="Following" i] *',
+            // 更广泛的搜索
+            'span:contains("following")',
+            'div:contains("following")',
+            'span[dir="ltr"]',
+            'div[dir="ltr"]',
           ];
 
           let result = -1;
@@ -623,12 +670,56 @@ const getFollowingCountFromTwitter = async (
         results[0].result.result === undefined ||
         results[0].result.result === -1
       ) {
-        console.log('步骤5: 主要提取方法失败，尝试备用方法...');
+        console.log('步骤5: 主要提取方法失败，等待5秒后尝试备用方法...');
+        await new Promise(resolve => setTimeout(resolve, 5000));
+
         results = await chrome.scripting.executeScript({
           target: { tabId: tab.id },
           func: backupExtractFollowingCount,
         });
         console.log('步骤5完成: 备用方法执行结果:', results);
+
+        // 如果备用方法也失败，再等待5秒尝试一次更激进的方法
+        if (
+          !results ||
+          !results[0] ||
+          results[0].result === null ||
+          results[0].result === undefined ||
+          results[0].result === -1
+        ) {
+          console.log('步骤6: 备用方法也失败，等待5秒后尝试最后一次...');
+          await new Promise(resolve => setTimeout(resolve, 5000));
+
+          // 最后一次尝试：重新执行主要方法
+          results = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: () => {
+              // 更简单直接的方法
+              const allText = document.body.textContent || '';
+              console.log('最后尝试：全页面文本长度:', allText.length);
+
+              // 查找所有包含following的数字
+              const matches = allText.match(/(\d+(?:,\d{3})*|\d+(?:\.\d+)?[KMB]?)\s*following/gi);
+              if (matches && matches.length > 0) {
+                console.log('最后尝试找到matches:', matches);
+                for (const match of matches) {
+                  const numbers = match.match(/\d+(?:,\d{3})*/);
+                  if (numbers) {
+                    const num = parseInt(numbers[0].replace(/,/g, ''), 10);
+                    if (!isNaN(num) && num >= 0 && num < 100000) {
+                      console.log('最后尝试成功提取:', num);
+                      return num;
+                    }
+                  }
+                }
+              }
+
+              console.log('最后尝试也失败了');
+              return -1;
+            },
+          });
+          console.log('步骤6完成: 最后尝试执行结果:', results);
+        }
       }
     } catch (scriptError) {
       console.error('执行脚本时出错:', scriptError);
@@ -900,11 +991,28 @@ const backupExtractFollowingCount = (): number => {
   console.log('使用备用方法提取关注数...');
 
   try {
+    // 检查页面状态
+    console.log(`备用方法页面状态: ${document.readyState}, URL: ${window.location.href}`);
+
+    // 检查是否为错误页面
+    const errorElements = document.querySelectorAll('[data-testid="error"], .error, [class*="error"]');
+    if (errorElements.length > 0) {
+      console.log('⚠️ 检测到错误页面，无法提取关注数');
+      return -1;
+    }
+
+    // 检查是否为私人账户
+    const privateElements = document.querySelectorAll('[data-testid="privateAccountPrompt"], [class*="private"]');
+    if (privateElements.length > 0) {
+      console.log('⚠️ 检测到私人账户，无法提取关注数');
+      return -1;
+    }
+
     // 方法1: 遍历所有包含数字的元素
     const allElements = document.querySelectorAll('*');
     const potentialElements = Array.from(allElements).filter(el => {
       const text = el.textContent?.trim();
-      return text && /\d/.test(text) && text.length < 20; // 数字通常不会太长
+      return text && /\d/.test(text) && text.length < 30; // 增加长度限制
     });
 
     console.log(`找到 ${potentialElements.length} 个包含数字的元素`);
@@ -977,19 +1085,69 @@ const backupExtractFollowingCount = (): number => {
       }
     }
 
-    // 方法3: 尝试在页面源码中查找
+    // 方法3: 尝试使用更激进的选择器
+    const aggressiveSelectors = [
+      'a[href*="following"]',
+      '[data-testid*="follow"]',
+      '[aria-label*="follow" i]',
+      'span[dir="ltr"]',
+      'div[dir="ltr"]',
+      'span',
+      'div',
+    ];
+
+    for (const selector of aggressiveSelectors) {
+      console.log(`尝试激进选择器: ${selector}`);
+      const elements = Array.from(document.querySelectorAll(selector));
+
+      for (const el of elements) {
+        const text = el.textContent?.trim();
+        if (!text || text.length > 50) continue;
+
+        // 查找包含数字和following的文本
+        if (text.toLowerCase().includes('following') || /\d+[,\.]?\d*\s*(K|M|B)?\s*following/i.test(text)) {
+          console.log(`激进方法找到following相关文本: "${text}"`);
+          const count = parseFollowingCount(text);
+          if (count !== null && count >= 0 && !isLikelyYear(count)) {
+            console.log(`激进方法成功提取关注数: ${count}`);
+            return count;
+          }
+        }
+      }
+    }
+
+    // 方法4: 全页面文本扫描
+    console.log('尝试全页面文本扫描...');
+    const pageText = document.body.textContent || '';
+    const followingMatches = pageText.match(/(\d+(?:,\d{3})*|\d+(?:\.\d+)?[KMB]?)\s*following/gi);
+    if (followingMatches) {
+      console.log(`全页面扫描找到: [${followingMatches.join(', ')}]`);
+      for (const match of followingMatches) {
+        const count = parseFollowingCount(match);
+        if (count !== null && count >= 0 && !isLikelyYear(count)) {
+          console.log(`全页面扫描成功提取关注数: ${count}`);
+          return count;
+        }
+      }
+    }
+
+    // 方法5: 尝试在页面源码中查找
     const pageSource = document.documentElement.outerHTML;
-    const followingMatch = pageSource.match(/following_count\D*(\d+)/i) || pageSource.match(/followingCount\D*(\d+)/i);
+    const followingMatch =
+      pageSource.match(/following_count\D*(\d+)/i) ||
+      pageSource.match(/followingCount\D*(\d+)/i) ||
+      pageSource.match(/"following_count":(\d+)/i) ||
+      pageSource.match(/"followingCount":(\d+)/i);
 
     if (followingMatch && followingMatch[1]) {
       const count = parseInt(followingMatch[1], 10);
       if (!isNaN(count) && count >= 0 && !isLikelyYear(count)) {
-        console.log(`备用方法3从源码提取关注数: ${count}`);
+        console.log(`备用方法5从源码提取关注数: ${count}`);
         return count;
       }
     }
 
-    console.log('备用方法都失败了');
+    console.log('所有备用方法都失败了');
     return -1;
   } catch (error) {
     console.error('备用提取方法出错:', error);
