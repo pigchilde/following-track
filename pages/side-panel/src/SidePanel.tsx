@@ -82,6 +82,14 @@ const SidePanel = () => {
     skipped: 0,
   });
 
+  // 添加清除站点数据的状态
+  const [clearSiteDataStatus, setClearSiteDataStatus] = useState<{
+    show: boolean;
+    timestamp: string;
+    screenName: string;
+    reason: string;
+  } | null>(null);
+
   const operationIdRef = useRef<string | null>(null);
   const shouldStopRef = useRef(false);
   const countdownTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -145,6 +153,32 @@ const SidePanel = () => {
       if (countdownTimerRef.current) {
         clearInterval(countdownTimerRef.current);
       }
+    };
+  }, []);
+
+  // 监听来自background的消息
+  useEffect(() => {
+    const messageListener = (message: any) => {
+      if (message.action === 'siteDataCleared') {
+        console.log('收到站点数据清除通知:', message);
+        setClearSiteDataStatus({
+          show: true,
+          timestamp: message.timestamp,
+          screenName: message.screenName,
+          reason: message.reason,
+        });
+
+        // 5秒后自动隐藏
+        setTimeout(() => {
+          setClearSiteDataStatus(prev => (prev ? { ...prev, show: false } : null));
+        }, 5000);
+      }
+    };
+
+    chrome.runtime.onMessage.addListener(messageListener);
+
+    return () => {
+      chrome.runtime.onMessage.removeListener(messageListener);
     };
   }, []);
 
@@ -1061,8 +1095,35 @@ const SidePanel = () => {
   };
 
   const clearFailedUsers = () => {
-    localStorage.removeItem('failedTwitterUsers');
     setFailedUsers([]);
+    localStorage.removeItem('failedTwitterUsers');
+  };
+
+  // 手动清除站点数据
+  const clearSiteData = async () => {
+    try {
+      const response = await chrome.runtime.sendMessage({
+        action: 'clearSiteData',
+      });
+
+      if (response.success) {
+        setClearSiteDataStatus({
+          show: true,
+          timestamp: response.timestamp,
+          screenName: '手动操作',
+          reason: '用户手动触发',
+        });
+
+        // 5秒后自动隐藏
+        setTimeout(() => {
+          setClearSiteDataStatus(prev => (prev ? { ...prev, show: false } : null));
+        }, 5000);
+      } else {
+        console.error('清除站点数据失败:', response.error);
+      }
+    } catch (error) {
+      console.error('清除站点数据请求失败:', error);
+    }
   };
 
   return (
@@ -1451,6 +1512,71 @@ const SidePanel = () => {
                           : 'border-gray-400 bg-gray-900/30 text-gray-200',
                 )}>
                 {progress}
+              </div>
+            )}
+
+            {clearSiteDataStatus && clearSiteDataStatus.show && (
+              <div
+                className={cn(
+                  'rounded-lg border p-3 text-sm transition-all duration-300',
+                  isLight
+                    ? 'border-purple-200 bg-purple-50 text-purple-800'
+                    : 'border-purple-700 bg-purple-900/30 text-purple-200',
+                )}>
+                <div className="flex items-center gap-2">
+                  <span className="text-lg">🧹</span>
+                  <div>
+                    <div className="font-semibold">站点数据已清除</div>
+                    <div className="text-xs opacity-80">
+                      用户: {clearSiteDataStatus.screenName} | 时间: {clearSiteDataStatus.timestamp}
+                    </div>
+                    <div className="text-xs opacity-80">原因: {clearSiteDataStatus.reason}</div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {!isLoading && !isRetrying && (
+              <div className="flex gap-2">
+                <button
+                  onClick={clearSiteData}
+                  className={cn(
+                    'flex-1 rounded-lg px-3 py-2 text-sm font-medium shadow transition-all duration-200',
+                    isLight
+                      ? 'bg-purple-500 text-white hover:bg-purple-600 hover:shadow-md'
+                      : 'bg-purple-600 text-white hover:bg-purple-700 hover:shadow-md',
+                  )}>
+                  🧹 清除站点数据
+                </button>
+
+                <button
+                  onClick={() => {
+                    const userConfirmed = confirm(
+                      '如果普通清除无效，建议执行以下强力清除步骤：\n\n' +
+                        '1. 关闭所有 Twitter/X 标签页\n' +
+                        '2. 打开 Chrome 开发者工具 (F12)\n' +
+                        '3. 转到 Application → Storage → IndexedDB\n' +
+                        '4. 手动删除所有 Twitter 相关数据库\n' +
+                        '5. 或者重启 Chrome 浏览器\n' +
+                        '6. 清除 Chrome 浏览器缓存和数据\n\n' +
+                        '是否要打开 Chrome 的清除数据页面？',
+                    );
+
+                    if (userConfirmed) {
+                      chrome.tabs.create({
+                        url: 'chrome://settings/clearBrowserData',
+                        active: true,
+                      });
+                    }
+                  }}
+                  className={cn(
+                    'rounded-lg px-3 py-2 text-sm font-medium shadow transition-all duration-200',
+                    isLight
+                      ? 'bg-red-500 text-white hover:bg-red-600 hover:shadow-md'
+                      : 'bg-red-600 text-white hover:bg-red-700 hover:shadow-md',
+                  )}>
+                  💪 强力清除
+                </button>
               </div>
             )}
 

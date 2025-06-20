@@ -98,6 +98,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     sendResponse({ success: true, message: '操作已停止' });
     return true;
   }
+
+  if (request.action === 'clearSiteData') {
+    console.log('收到清除站点数据请求');
+    clearTwitterSiteData()
+      .then(() => {
+        console.log('站点数据清除成功');
+        sendResponse({ success: true, message: '站点数据已清除', timestamp: new Date().toLocaleString() });
+      })
+      .catch(error => {
+        console.error('清除站点数据失败:', error);
+        sendResponse({ success: false, error: error.message, timestamp: new Date().toLocaleString() });
+      });
+    return true;
+  }
 });
 
 // 等待页面元素加载的辅助函数
@@ -370,16 +384,88 @@ const getFollowingCountFromTwitter = async (
           logs.push(`页面URL: ${window.location.href}`);
           logs.push(`页面加载状态: ${document.readyState}`);
 
-          // 检查页面是否可能出现错误
+          // 优先检查是否存在特定的错误页面
+          const checkForSpecificError = (): boolean => {
+            // 检测用户提到的特定错误页面结构
+            const errorTexts = [
+              '出错了。请尝试重新加载。',
+              '出错了。请尝试重新加载',
+              'Something went wrong. Try reloading.',
+              'Something went wrong. Try reloading',
+            ];
+
+            for (const errorText of errorTexts) {
+              // 查找包含错误文本的元素
+              const errorElements = Array.from(document.querySelectorAll('*')).filter(el => {
+                const text = el.textContent?.trim();
+                return text && text.includes(errorText);
+              });
+
+              if (errorElements.length > 0) {
+                logs.push(`🚨 检测到特定错误页面，找到错误文本: "${errorText}"`);
+
+                // 进一步验证是否确实是错误页面（检查是否有重试按钮）
+                const retryButtons = document.querySelectorAll('button[role="button"]');
+                let hasRetryButton = false;
+
+                for (const button of Array.from(retryButtons)) {
+                  const buttonText = button.textContent?.trim();
+                  if (
+                    buttonText &&
+                    (buttonText.includes('重试') || buttonText.includes('retry') || buttonText.includes('Retry'))
+                  ) {
+                    hasRetryButton = true;
+                    logs.push(`✅ 确认找到重试按钮: "${buttonText}"`);
+                    break;
+                  }
+                }
+
+                if (hasRetryButton) {
+                  logs.push(`🔥 确认这是需要清除数据的错误页面`);
+                  return true;
+                }
+              }
+            }
+
+            // 也检查用户提供的具体DOM结构
+            const specificErrorElements = document.querySelectorAll(
+              'span.css-1jxf684.r-bcqeeo.r-1ttztb7.r-qvutc0.r-poiln3',
+            );
+            for (const el of Array.from(specificErrorElements)) {
+              const text = el.textContent?.trim();
+              if (text && text.includes('出错了')) {
+                logs.push(`🚨 通过CSS选择器检测到错误页面: "${text}"`);
+                return true;
+              }
+            }
+
+            return false;
+          };
+
+          // 检查是否为需要清除数据的错误页面
+          const isSpecificErrorPage = checkForSpecificError();
+
+          if (isSpecificErrorPage) {
+            logs.push('❌ 检测到特定错误页面，需要清除站点数据');
+            return {
+              result: -1,
+              logs: logs,
+              isSpecificError: true, // 标记这是特定的错误页面
+              timestamp: Date.now(),
+              elementsFound: 0,
+            };
+          }
+
+          // 检查页面是否可能出现其他错误（但不清除数据）
           const errorElements = document.querySelectorAll('[data-testid="error"]');
           if (errorElements.length > 0) {
-            logs.push(`⚠️ 页面包含错误元素: ${errorElements.length} 个`);
+            logs.push(`⚠️ 页面包含一般错误元素: ${errorElements.length} 个（不触发数据清除）`);
           }
 
           // 检查是否为私人账户
           const privateAccountElements = document.querySelectorAll('[data-testid="privateAccountPrompt"]');
           if (privateAccountElements.length > 0) {
-            logs.push(`⚠️ 检测到私人账户提示`);
+            logs.push(`⚠️ 检测到私人账户提示（不触发数据清除）`);
           }
 
           // 统计页面上所有包含数字的元素
@@ -679,13 +765,51 @@ const getFollowingCountFromTwitter = async (
         });
         console.log('步骤5完成: 备用方法执行结果:', results);
 
+        // 检查备用方法是否检测到特定错误页面
+        if (
+          results &&
+          results[0] &&
+          typeof results[0].result === 'object' &&
+          results[0].result &&
+          'isSpecificError' in results[0].result
+        ) {
+          const backupResultData = results[0].result as { result: number; isSpecificError: boolean };
+          if (backupResultData.isSpecificError) {
+            console.log(`🚨 备用方法检测到特定错误页面，立即清除站点数据...`);
+            try {
+              await clearTwitterSiteData();
+              console.log(`清除站点数据完成，用于用户: ${screenName}`);
+
+              // 通知侧边栏清除站点数据的操作
+              try {
+                chrome.runtime.sendMessage({
+                  action: 'siteDataCleared',
+                  screenName: screenName,
+                  timestamp: new Date().toLocaleString(),
+                  reason: '备用方法检测到错误页面',
+                });
+              } catch (msgError) {
+                console.warn('发送站点数据清除通知失败:', msgError);
+              }
+            } catch (clearError) {
+              console.error(`清除站点数据失败:`, clearError);
+            }
+
+            return -1;
+          }
+        }
+
         // 如果备用方法也失败，再等待5秒尝试一次更激进的方法
         if (
           !results ||
           !results[0] ||
           results[0].result === null ||
           results[0].result === undefined ||
-          results[0].result === -1
+          results[0].result === -1 ||
+          (typeof results[0].result === 'object' &&
+            results[0].result &&
+            'result' in results[0].result &&
+            results[0].result.result === -1)
         ) {
           console.log('步骤6: 备用方法也失败，等待5秒后尝试最后一次...');
           await new Promise(resolve => setTimeout(resolve, 5000));
@@ -736,19 +860,56 @@ const getFollowingCountFromTwitter = async (
 
     if (results && results[0] && results[0].result !== null && results[0].result !== undefined) {
       let followingCount: number;
+      let isSpecificError = false;
 
       // 检查返回值类型
       if (typeof results[0].result === 'object' && results[0].result && 'result' in results[0].result) {
-        // 新的返回格式，包含logs等信息
-        const resultData = results[0].result as {
-          result: number;
-          logs: string[];
-          timestamp: number;
-          elementsFound: number;
-        };
-        followingCount = resultData.result;
-        console.log('提取过程日志:', resultData.logs);
-        console.log('找到的元素数量:', resultData.elementsFound);
+        // 新的返回格式，包含logs等信息或者备用方法的结果格式
+        if ('logs' in results[0].result) {
+          // 主要方法的返回格式
+          const resultData = results[0].result as {
+            result: number;
+            logs: string[];
+            timestamp: number;
+            elementsFound: number;
+            isSpecificError?: boolean;
+          };
+          followingCount = resultData.result;
+          isSpecificError = resultData.isSpecificError || false;
+          console.log('提取过程日志:', resultData.logs);
+          console.log('找到的元素数量:', resultData.elementsFound);
+        } else {
+          // 备用方法的返回格式
+          const backupResultData = results[0].result as { result: number; isSpecificError: boolean };
+          followingCount = backupResultData.result;
+          isSpecificError = backupResultData.isSpecificError || false;
+          console.log('备用方法检测结果:', backupResultData);
+        }
+
+        // 如果检测到特定错误页面，直接清除数据并返回
+        if (isSpecificError) {
+          console.log(`🚨 检测到特定错误页面，立即清除站点数据...`);
+          try {
+            await clearTwitterSiteData();
+            console.log(`清除站点数据完成，用于用户: ${screenName}`);
+
+            // 通知侧边栏清除站点数据的操作
+            try {
+              chrome.runtime.sendMessage({
+                action: 'siteDataCleared',
+                screenName: screenName,
+                timestamp: new Date().toLocaleString(),
+                reason: '检测到错误页面',
+              });
+            } catch (msgError) {
+              console.warn('发送站点数据清除通知失败:', msgError);
+            }
+          } catch (clearError) {
+            console.error(`清除站点数据失败:`, clearError);
+          }
+
+          return -1;
+        }
       } else {
         // 旧的返回格式，直接是数字
         followingCount = results[0].result as number;
@@ -769,7 +930,7 @@ const getFollowingCountFromTwitter = async (
             await new Promise(resolve => setTimeout(resolve, 2000)); // 等待2秒
             return await getFollowingCountFromTwitter(screenName, operationId, false); // 重试时创建新标签页
           } else {
-            console.log(`数据异常且已达到最大重试次数，放弃获取 ${screenName} 的关注数`);
+            console.log(`数据异常且已达到最大重试次数，但不清除站点数据（仅在特定错误页面时清除）`);
             retryAttempts.delete(key);
             return -1;
           }
@@ -787,7 +948,7 @@ const getFollowingCountFromTwitter = async (
             await new Promise(resolve => setTimeout(resolve, 2000)); // 等待2秒
             return await getFollowingCountFromTwitter(screenName, operationId, false); // 重试时创建新标签页
           } else {
-            console.log(`疑似年份数据且已达到最大重试次数，放弃获取 ${screenName} 的关注数`);
+            console.log(`疑似年份数据且已达到最大重试次数，但不清除站点数据（仅在特定错误页面时清除）`);
             retryAttempts.delete(key);
             return -1;
           }
@@ -798,6 +959,8 @@ const getFollowingCountFromTwitter = async (
       }
     }
 
+    // 无法获取关注数据时，不再自动清除站点数据
+    console.log(`无法获取关注数据，但不清除站点数据（仅在检测到特定错误页面时清除）`);
     throw new Error('无法获取关注数据');
   } catch (error) {
     console.error(`获取 ${screenName} 关注数时出错:`, error);
@@ -829,7 +992,7 @@ const getFollowingCountFromTwitter = async (
       await new Promise(resolve => setTimeout(resolve, 5000));
       return await getFollowingCountFromTwitter(screenName, operationId, false); // 重试时创建新标签页
     } else {
-      console.log(`用户 ${screenName} 重试次数已用完，返回 -1`);
+      console.log(`用户 ${screenName} 重试次数已用完，但不清除站点数据（仅在特定错误页面时清除）`);
       retryAttempts.delete(key);
       return -1;
     }
@@ -987,24 +1150,91 @@ const scrollPageToLoadContent = async (tabId: number): Promise<void> => {
 };
 
 // 备用方法提取关注数
-const backupExtractFollowingCount = (): number => {
+const backupExtractFollowingCount = (): number | { result: number; isSpecificError: boolean } => {
   console.log('使用备用方法提取关注数...');
 
   try {
     // 检查页面状态
     console.log(`备用方法页面状态: ${document.readyState}, URL: ${window.location.href}`);
 
-    // 检查是否为错误页面
+    // 优先检查是否存在特定的错误页面
+    const checkForSpecificError = (): boolean => {
+      // 检测用户提到的特定错误页面结构
+      const errorTexts = [
+        '出错了。请尝试重新加载。',
+        '出错了。请尝试重新加载',
+        'Something went wrong. Try reloading.',
+        'Something went wrong. Try reloading',
+      ];
+
+      for (const errorText of errorTexts) {
+        // 查找包含错误文本的元素
+        const errorElements = Array.from(document.querySelectorAll('*')).filter(el => {
+          const text = el.textContent?.trim();
+          return text && text.includes(errorText);
+        });
+
+        if (errorElements.length > 0) {
+          console.log(`🚨 备用方法检测到特定错误页面，找到错误文本: "${errorText}"`);
+
+          // 进一步验证是否确实是错误页面（检查是否有重试按钮）
+          const retryButtons = document.querySelectorAll('button[role="button"]');
+          let hasRetryButton = false;
+
+          for (const button of Array.from(retryButtons)) {
+            const buttonText = button.textContent?.trim();
+            if (
+              buttonText &&
+              (buttonText.includes('重试') || buttonText.includes('retry') || buttonText.includes('Retry'))
+            ) {
+              hasRetryButton = true;
+              console.log(`✅ 备用方法确认找到重试按钮: "${buttonText}"`);
+              break;
+            }
+          }
+
+          if (hasRetryButton) {
+            console.log(`🔥 备用方法确认这是需要清除数据的错误页面`);
+            return true;
+          }
+        }
+      }
+
+      // 也检查用户提供的具体DOM结构
+      const specificErrorElements = document.querySelectorAll('span.css-1jxf684.r-bcqeeo.r-1ttztb7.r-qvutc0.r-poiln3');
+      for (const el of Array.from(specificErrorElements)) {
+        const text = el.textContent?.trim();
+        if (text && text.includes('出错了')) {
+          console.log(`🚨 备用方法通过CSS选择器检测到错误页面: "${text}"`);
+          return true;
+        }
+      }
+
+      return false;
+    };
+
+    // 检查是否为需要清除数据的错误页面
+    const isSpecificErrorPage = checkForSpecificError();
+
+    if (isSpecificErrorPage) {
+      console.log('❌ 备用方法检测到特定错误页面，需要清除站点数据');
+      return {
+        result: -1,
+        isSpecificError: true,
+      };
+    }
+
+    // 检查是否为其他错误页面（但不清除数据）
     const errorElements = document.querySelectorAll('[data-testid="error"], .error, [class*="error"]');
     if (errorElements.length > 0) {
-      console.log('⚠️ 检测到错误页面，无法提取关注数');
+      console.log('⚠️ 检测到一般错误页面，无法提取关注数（不触发数据清除）');
       return -1;
     }
 
     // 检查是否为私人账户
     const privateElements = document.querySelectorAll('[data-testid="privateAccountPrompt"], [class*="private"]');
     if (privateElements.length > 0) {
-      console.log('⚠️ 检测到私人账户，无法提取关注数');
+      console.log('⚠️ 检测到私人账户，无法提取关注数（不触发数据清除）');
       return -1;
     }
 
@@ -1277,6 +1507,440 @@ const parseFollowingCount = (text: string): number | null => {
   }
 
   return null;
+};
+
+// 清除 Twitter 站点数据的函数
+const clearTwitterSiteData = async (): Promise<void> => {
+  console.log('开始清除 Twitter 站点数据...');
+
+  try {
+    // 第二步：使用页面脚本直接清除IndexedDB和其他存储
+    try {
+      console.log('使用页面脚本直接清除存储数据...');
+
+      // 创建一个临时标签页
+      const tempTab = await chrome.tabs.create({
+        url: 'https://x.com',
+        active: false,
+      });
+
+      if (tempTab.id) {
+        try {
+          // 等待页面完全加载
+          await new Promise(resolve => setTimeout(resolve, 5000));
+
+          // 注入强力清除脚本
+          const result = await chrome.scripting.executeScript({
+            target: { tabId: tempTab.id },
+            func: async () => {
+              console.log('开始执行强力清除...');
+              const results = [];
+
+              try {
+                // 1. 强制清除所有IndexedDB数据库
+                if ('indexedDB' in window) {
+                  console.log('清除IndexedDB...');
+
+                  // 获取所有数据库
+                  const databases = await indexedDB.databases();
+                  console.log('发现数据库:', databases);
+                  results.push(`发现 ${databases.length} 个数据库`);
+
+                  // 强制删除每个数据库
+                  for (const db of databases) {
+                    if (db.name) {
+                      try {
+                        console.log(`强制删除数据库: ${db.name}`);
+
+                        // 创建删除请求
+                        const deleteRequest = indexedDB.deleteDatabase(db.name);
+
+                        // 强制等待删除完成
+                        await new Promise(resolve => {
+                          const timeout = setTimeout(() => {
+                            console.log(`数据库 ${db.name} 删除超时，强制继续`);
+                            resolve(false);
+                          }, 3000); // 3秒超时
+
+                          deleteRequest.onsuccess = () => {
+                            console.log(`数据库 ${db.name} 删除成功`);
+                            clearTimeout(timeout);
+                            resolve(true);
+                          };
+
+                          deleteRequest.onerror = event => {
+                            console.error(`删除数据库 ${db.name} 失败:`, event);
+                            clearTimeout(timeout);
+                            resolve(false);
+                          };
+
+                          deleteRequest.onblocked = () => {
+                            console.warn(`数据库 ${db.name} 删除被阻塞，尝试强制删除`);
+                            // 不等待，直接继续
+                            clearTimeout(timeout);
+                            resolve(false);
+                          };
+                        });
+
+                        results.push(`删除数据库: ${db.name}`);
+                      } catch (dbError: any) {
+                        console.error(`删除数据库 ${db.name} 异常:`, dbError);
+                        results.push(`删除数据库 ${db.name} 失败: ${dbError.message}`);
+                      }
+                    }
+                  }
+
+                  // 验证删除结果
+                  try {
+                    const remainingDbs = await indexedDB.databases();
+                    console.log('删除后剩余数据库:', remainingDbs);
+                    results.push(`剩余数据库: ${remainingDbs.length} 个`);
+                  } catch (checkError) {
+                    console.warn('检查剩余数据库失败:', checkError);
+                  }
+                }
+
+                // 2. 清除其他存储
+                try {
+                  const beforeLocal = localStorage.length;
+                  const beforeSession = sessionStorage.length;
+
+                  localStorage.clear();
+                  sessionStorage.clear();
+
+                  results.push(`localStorage: ${beforeLocal} → 0`);
+                  results.push(`sessionStorage: ${beforeSession} → 0`);
+                  console.log('localStorage和sessionStorage已清除');
+                } catch (storageError: any) {
+                  console.error('清除localStorage/sessionStorage失败:', storageError);
+                  results.push(`存储清除失败: ${storageError.message}`);
+                }
+
+                // 3. 清除所有缓存
+                if ('caches' in window) {
+                  try {
+                    const cacheNames = await caches.keys();
+                    console.log('发现缓存:', cacheNames);
+
+                    let deletedCaches = 0;
+                    for (const cacheName of cacheNames) {
+                      try {
+                        const deleted = await caches.delete(cacheName);
+                        if (deleted) {
+                          deletedCaches++;
+                          console.log(`缓存 ${cacheName} 已删除`);
+                        }
+                      } catch (cacheError: any) {
+                        console.error(`删除缓存 ${cacheName} 失败:`, cacheError);
+                      }
+                    }
+
+                    results.push(`删除缓存: ${deletedCaches}/${cacheNames.length}`);
+                  } catch (cacheError: any) {
+                    console.error('清除缓存失败:', cacheError);
+                    results.push(`缓存清除失败: ${cacheError.message}`);
+                  }
+                }
+
+                // 4. 尝试清除Service Workers
+                if ('navigator' in window && 'serviceWorker' in navigator) {
+                  try {
+                    const registrations = await navigator.serviceWorker.getRegistrations();
+                    for (const registration of registrations) {
+                      await registration.unregister();
+                    }
+                    results.push(`Service Workers: ${registrations.length} 个已注销`);
+                  } catch (swError) {
+                    console.error('清除Service Workers失败:', swError);
+                  }
+                }
+
+                // 5. 强力清除所有Cookie
+                try {
+                  console.log('开始强力清除Cookie...');
+                  let cookieCount = 0;
+
+                  // 获取当前域名的所有Cookie
+                  const currentCookies = document.cookie.split(';');
+                  cookieCount = currentCookies.filter(cookie => cookie.trim()).length;
+                  console.log(`发现 ${cookieCount} 个Cookie:`, currentCookies);
+
+                  // 方法1: 通过document.cookie清除
+                  const cookiesToClear = document.cookie.split(';');
+                  let clearedCookies = 0;
+
+                  for (const cookie of cookiesToClear) {
+                    const eqPos = cookie.indexOf('=');
+                    const name = eqPos > -1 ? cookie.substr(0, eqPos).trim() : cookie.trim();
+                    if (name) {
+                      // 清除不同路径和域名的cookie
+                      const clearPaths = ['/', '/home', '/i', '/messages', '/explore', '/notifications'];
+                      const clearDomains = ['', '.x.com', '.twitter.com', '.twimg.com', '.t.co'];
+
+                      for (const path of clearPaths) {
+                        for (const domain of clearDomains) {
+                          try {
+                            // 设置过期时间为过去的时间来删除cookie
+                            const expireDate = 'Thu, 01 Jan 1970 00:00:00 GMT';
+                            document.cookie = `${name}=; expires=${expireDate}; path=${path}${domain ? `; domain=${domain}` : ''}`;
+                            document.cookie = `${name}=; expires=${expireDate}; path=${path}${domain ? `; domain=${domain}` : ''}; secure`;
+                            document.cookie = `${name}=; expires=${expireDate}; path=${path}${domain ? `; domain=${domain}` : ''}; httponly`;
+                            document.cookie = `${name}=; expires=${expireDate}; path=${path}${domain ? `; domain=${domain}` : ''}; secure; httponly`;
+                            document.cookie = `${name}=; expires=${expireDate}; path=${path}${domain ? `; domain=${domain}` : ''}; samesite=strict`;
+                            document.cookie = `${name}=; expires=${expireDate}; path=${path}${domain ? `; domain=${domain}` : ''}; samesite=lax`;
+                            document.cookie = `${name}=; expires=${expireDate}; path=${path}${domain ? `; domain=${domain}` : ''}; samesite=none; secure`;
+                          } catch (cookieError) {
+                            // 忽略单个cookie清除失败
+                          }
+                        }
+                      }
+                      clearedCookies++;
+                    }
+                  }
+
+                  // 额外尝试：通过设置max-age来清除
+                  const cookiesAgain = document.cookie.split(';');
+                  for (const cookie of cookiesAgain) {
+                    const eqPos = cookie.indexOf('=');
+                    const name = eqPos > -1 ? cookie.substr(0, eqPos).trim() : cookie.trim();
+                    if (name) {
+                      try {
+                        // 使用max-age=0来删除cookie
+                        document.cookie = `${name}=; max-age=0; path=/`;
+                        document.cookie = `${name}=; max-age=0; path=/; domain=.x.com`;
+                        document.cookie = `${name}=; max-age=0; path=/; domain=.twitter.com`;
+                        document.cookie = `${name}=; max-age=0; path=/; domain=.twimg.com`;
+                        document.cookie = `${name}=; max-age=0; path=/; domain=.t.co`;
+                      } catch (maxAgeError) {
+                        // 忽略错误
+                      }
+                    }
+                  }
+
+                  // 最后的暴力方法：尝试清除可能的常见Twitter cookie名称
+                  const commonTwitterCookies = [
+                    'auth_token',
+                    'guest_id',
+                    'personalization_id',
+                    'ct0',
+                    '_twitter_sess',
+                    'guest_id_ads',
+                    'guest_id_marketing',
+                    'kdt',
+                    'remember_checked_on',
+                    'twid',
+                    'external_referer',
+                    'des_opt_in',
+                    'rweb_optin',
+                  ];
+
+                  for (const cookieName of commonTwitterCookies) {
+                    try {
+                      document.cookie = `${cookieName}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`;
+                      document.cookie = `${cookieName}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; domain=.x.com`;
+                      document.cookie = `${cookieName}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; domain=.twitter.com`;
+                      document.cookie = `${cookieName}=; max-age=0; path=/`;
+                      document.cookie = `${cookieName}=; max-age=0; path=/; domain=.x.com`;
+                      document.cookie = `${cookieName}=; max-age=0; path=/; domain=.twitter.com`;
+                    } catch (commonCookieError) {
+                      // 忽略错误
+                    }
+                  }
+
+                  // 验证清除结果
+                  const remainingCookies = document.cookie.split(';').filter(cookie => cookie.trim()).length;
+                  results.push(`Cookie清除: ${cookieCount} → ${remainingCookies} (清除了 ${clearedCookies} 个)`);
+                  console.log('Cookie清除完成，剩余Cookie:', document.cookie);
+                } catch (cookieError: any) {
+                  console.error('清除Cookie失败:', cookieError);
+                  results.push(`Cookie清除失败: ${cookieError.message}`);
+                }
+
+                console.log('页面级强力清除完成:', results);
+                return {
+                  success: true,
+                  results: results,
+                  message: '强力清除完成',
+                };
+              } catch (error: any) {
+                console.error('强力清除过程中出错:', error);
+                return {
+                  success: false,
+                  error: error.message,
+                  results: results,
+                };
+              }
+            },
+          });
+
+          console.log('页面脚本执行结果:', result);
+        } catch (scriptError) {
+          console.error('页面脚本执行失败:', scriptError);
+        } finally {
+          // 关闭临时标签页
+          try {
+            await chrome.tabs.remove(tempTab.id);
+            console.log('临时标签页已关闭');
+          } catch (removeError) {
+            console.warn('关闭临时标签页失败:', removeError);
+          }
+        }
+      }
+    } catch (error) {
+      console.warn('页面脚本清除方法失败:', error);
+    }
+
+    console.log('Twitter 站点数据清除完成！');
+
+    // 第三步：使用Chrome官方API清除浏览数据
+    try {
+      console.log('使用Chrome官方API清除浏览数据...');
+
+      const origins = [
+        'https://twitter.com',
+        'https://x.com',
+        'https://www.twitter.com',
+        'https://www.x.com',
+        'https://mobile.twitter.com',
+        'https://m.twitter.com',
+        'https://api.twitter.com',
+        'https://api.x.com',
+        'https://abs.twimg.com',
+        'https://pbs.twimg.com',
+        'https://video.twimg.com',
+        'https://t.co',
+        'https://tweetdeck.twitter.com',
+        'https://analytics.twitter.com',
+        'https://ads.twitter.com',
+        'https://business.twitter.com',
+        'https://help.twitter.com',
+      ];
+
+      console.log('第一次清除：针对特定域名的所有数据...');
+      // 清除支持origin过滤的数据类型
+      await chrome.browsingData.remove(
+        {
+          origins: origins,
+          since: 0, // 从开始时间清除所有数据
+        },
+        {
+          cache: true,
+          cacheStorage: true,
+          cookies: true,
+          fileSystems: true,
+          indexedDB: true,
+          localStorage: true,
+          serviceWorkers: true,
+          webSQL: true,
+        },
+      );
+
+      console.log('第二次清除：强力清除所有Twitter相关的cookies...');
+      // 额外的强力cookie清除：使用cookies API直接删除
+      try {
+        // 获取所有Twitter相关的cookies并删除
+        const allCookies = await chrome.cookies.getAll({});
+        let deletedCookieCount = 0;
+
+        for (const cookie of allCookies) {
+          const domain = cookie.domain.toLowerCase();
+          const name = cookie.name.toLowerCase();
+
+          // 检查是否是Twitter相关的cookie
+          if (
+            domain.includes('twitter.com') ||
+            domain.includes('x.com') ||
+            domain.includes('twimg.com') ||
+            domain.includes('t.co') ||
+            name.includes('twitter') ||
+            name.includes('auth_token') ||
+            name.includes('guest_id') ||
+            name.includes('personalization_id') ||
+            name.includes('ct0') ||
+            name.includes('_twitter_sess')
+          ) {
+            try {
+              const url = `http${cookie.secure ? 's' : ''}://${cookie.domain.startsWith('.') ? cookie.domain.slice(1) : cookie.domain}${cookie.path}`;
+              await chrome.cookies.remove({
+                url: url,
+                name: cookie.name,
+                storeId: cookie.storeId,
+              });
+              deletedCookieCount++;
+              console.log(`删除Cookie: ${cookie.name} from ${cookie.domain}`);
+            } catch (cookieError) {
+              console.warn(`删除Cookie失败: ${cookie.name}`, cookieError);
+            }
+          }
+        }
+
+        console.log(`通过Cookies API删除了 ${deletedCookieCount} 个相关Cookie`);
+      } catch (cookiesApiError) {
+        console.warn('通过Cookies API清除失败:', cookiesApiError);
+      }
+
+      console.log('第三次清除：清除最近时间段的相关数据...');
+      // 清除不支持origin过滤的数据类型（按时间范围）
+      await chrome.browsingData.remove(
+        {
+          since: Date.now() - 30 * 24 * 60 * 60 * 1000, // 最近30天
+        },
+        {
+          appcache: true,
+          formData: true,
+          cookies: true, // 再次清除cookies以确保彻底
+        },
+      );
+
+      console.log('第四次清除：全局强力清除（谨慎使用）...');
+      // 最后的强力清除：清除所有cookies（可选，比较激进）
+      try {
+        await chrome.browsingData.remove(
+          {
+            since: 0,
+          },
+          {
+            cookies: true,
+          },
+        );
+        console.log('全局Cookie清除完成');
+      } catch (globalClearError) {
+        console.warn('全局Cookie清除失败:', globalClearError);
+      }
+
+      console.log('Chrome官方API清除完成');
+    } catch (error) {
+      console.warn('Chrome官方API清除失败:', error);
+    }
+
+    // 第四步：强制重新加载所有Twitter页面
+    try {
+      console.log('强制重新加载所有Twitter页面...');
+
+      const tabs = await chrome.tabs.query({
+        url: ['*://twitter.com/*', '*://x.com/*', '*://www.twitter.com/*', '*://www.x.com/*'],
+      });
+
+      for (const tab of tabs) {
+        if (tab.id) {
+          try {
+            await chrome.tabs.reload(tab.id, { bypassCache: true });
+            console.log(`已强制刷新标签页: ${tab.url}`);
+          } catch (reloadError) {
+            console.warn(`刷新标签页失败:`, reloadError);
+          }
+        }
+      }
+    } catch (error) {
+      console.warn('重新加载页面失败:', error);
+    }
+
+    // 等待所有操作完成
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  } catch (error: any) {
+    console.error('清除 Twitter 站点数据时出错:', error);
+    throw error;
+  }
 };
 
 console.log('Background loaded');
