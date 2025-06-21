@@ -640,6 +640,27 @@ const SidePanel = () => {
                 console.error(`❌ 更新用户 ${user.screenName} 数据库记录失败:`, updateError);
               }
 
+              // 验证后再次确认是否真的有变化
+              if (finalNewAdditions === 0) {
+                console.log(`🔍 验证后最终确认无变化: finalNewAdditions = ${finalNewAdditions}，不返回变化信息`);
+
+                if (isRetryMode) {
+                  console.log(`重试成功(验证后最终确认无变化)，从失败列表中移除用户 ${user.screenName}`);
+                  const updatedFailedUsers = failedUsers.filter(u => u.id !== user.id);
+                  localStorage.setItem('failedTwitterUsers', JSON.stringify(updatedFailedUsers));
+                  setFailedUsers(updatedFailedUsers);
+                }
+
+                setStats(prev => ({ ...prev, successful: prev.successful + 1, skipped: prev.skipped + 1 }));
+                statsRef.current = {
+                  ...statsRef.current,
+                  successful: statsRef.current.successful + 1,
+                  skipped: statsRef.current.skipped + 1,
+                };
+
+                return null; // 不返回changeInfo，因为验证后实际没有变化
+              }
+
               const changeInfo = `${user.screenName} (ID: ${user.id}): ${userFollowingCount} → ${finalFollowingCount} (${finalNewAdditions > 0 ? '+' : ''}${finalNewAdditions}) [已验证]`;
 
               setStats(prev => ({ ...prev, successful: prev.successful + 1, changed: prev.changed + 1 }));
@@ -664,6 +685,28 @@ const SidePanel = () => {
             }
 
             console.log(`✅ 验证成功，数据一致，变化幅度正常: ${verifyChangeAmount} 人`);
+            // 验证成功后，重新检查是否真的有变化
+            if (verifyFollowingCount === userFollowingCount) {
+              // 验证后发现实际没有变化，应该跳到无变化的处理逻辑
+              console.log(`🔍 验证后发现实际无变化: ${userFollowingCount} → ${verifyFollowingCount}，跳过更新数据库`);
+
+              if (isRetryMode) {
+                console.log(`重试成功(验证后无变化)，从失败列表中移除用户 ${user.screenName}`);
+                const updatedFailedUsers = failedUsers.filter(u => u.id !== user.id);
+                localStorage.setItem('failedTwitterUsers', JSON.stringify(updatedFailedUsers));
+                setFailedUsers(updatedFailedUsers);
+              }
+
+              setStats(prev => ({ ...prev, successful: prev.successful + 1, skipped: prev.skipped + 1 }));
+              statsRef.current = {
+                ...statsRef.current,
+                successful: statsRef.current.successful + 1,
+                skipped: statsRef.current.skipped + 1,
+              };
+
+              return null; // 不返回changeInfo，因为实际没有变化
+            }
+            // 验证成功且确实有变化，继续执行正常更新逻辑
           } catch (verifyError) {
             console.error(`验证 ${user.screenName} 关注数时出错:`, verifyError);
             const error = `验证关注数失败: ${verifyError instanceof Error ? verifyError.message : '未知错误'}`;
@@ -688,6 +731,27 @@ const SidePanel = () => {
           console.log(`✅ 成功更新用户 ${user.screenName} 的数据库记录`);
         } catch (updateError) {
           console.error(`❌ 更新用户 ${user.screenName} 数据库记录失败:`, updateError);
+        }
+
+        // 再次确认是否真的有变化
+        if (newAdditions === 0) {
+          console.log(`🔍 最终确认无变化: newAdditions = ${newAdditions}，不返回变化信息`);
+
+          if (isRetryMode) {
+            console.log(`重试成功(最终确认无变化)，从失败列表中移除用户 ${user.screenName}`);
+            const updatedFailedUsers = failedUsers.filter(u => u.id !== user.id);
+            localStorage.setItem('failedTwitterUsers', JSON.stringify(updatedFailedUsers));
+            setFailedUsers(updatedFailedUsers);
+          }
+
+          setStats(prev => ({ ...prev, successful: prev.successful + 1, skipped: prev.skipped + 1 }));
+          statsRef.current = {
+            ...statsRef.current,
+            successful: statsRef.current.successful + 1,
+            skipped: statsRef.current.skipped + 1,
+          };
+
+          return null; // 不返回changeInfo，因为实际没有变化
         }
 
         const changeInfo = `${user.screenName} (ID: ${user.id}): ${userFollowingCount} → ${currentFollowingCount} (${newAdditions > 0 ? '+' : ''}${newAdditions})`;
