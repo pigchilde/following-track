@@ -28,6 +28,63 @@ let retryAttempts = new Map<string, number>(); // 用于记录重试次数
 let tabsMap = new Map<string, number>(); // 存储操作ID到标签页ID的映射
 let currentTabId: number | null = null; // 添加全局变量跟踪当前标签页ID
 
+// 关闭所有操作相关的标签页
+const closeAllOperationTabs = async (
+  operationId?: string,
+): Promise<{
+  closedCount: number;
+  errors: string[];
+}> => {
+  console.log(`开始关闭所有操作相关的标签页，操作ID: ${operationId || '所有'}`);
+
+  let closedCount = 0;
+  const errors: string[] = [];
+
+  try {
+    // 如果指定了操作ID，只关闭该操作相关的标签页
+    if (operationId) {
+      const tabId = tabsMap.get(operationId);
+      if (tabId) {
+        try {
+          await chrome.tabs.remove(tabId);
+          console.log(`关闭操作 ${operationId} 的标签页 ${tabId}`);
+          tabsMap.delete(operationId);
+          closedCount++;
+        } catch (error) {
+          const errorMsg = `关闭标签页 ${tabId} 失败: ${error instanceof Error ? error.message : '未知错误'}`;
+          console.error(errorMsg);
+          errors.push(errorMsg);
+        }
+      }
+    } else {
+      // 关闭所有映射中的标签页
+      const tabsToClose = Array.from(tabsMap.entries());
+      console.log(`准备关闭 ${tabsToClose.length} 个标签页`);
+
+      for (const [opId, tabId] of tabsToClose) {
+        try {
+          await chrome.tabs.remove(tabId);
+          console.log(`关闭操作 ${opId} 的标签页 ${tabId}`);
+          tabsMap.delete(opId);
+          closedCount++;
+        } catch (error) {
+          const errorMsg = `关闭标签页 ${tabId} (操作ID: ${opId}) 失败: ${error instanceof Error ? error.message : '未知错误'}`;
+          console.error(errorMsg);
+          errors.push(errorMsg);
+        }
+      }
+    }
+
+    console.log(`标签页关闭完成，成功关闭 ${closedCount} 个，失败 ${errors.length} 个`);
+    return { closedCount, errors };
+  } catch (error) {
+    const errorMsg = `关闭标签页过程中出错: ${error instanceof Error ? error.message : '未知错误'}`;
+    console.error(errorMsg);
+    errors.push(errorMsg);
+    return { closedCount, errors };
+  }
+};
+
 // 监听插件图标点击事件，打开侧边栏
 chrome.action.onClicked.addListener(async (tab: chrome.tabs.Tab) => {
   // 在当前窗口打开侧边栏
@@ -96,6 +153,25 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     console.log(`操作已停止，操作ID: ${currentOperationId} -> null`);
     currentOperationId = null;
     sendResponse({ success: true, message: '操作已停止' });
+    return true;
+  }
+
+  if (request.action === 'closeAllTabs') {
+    console.log('收到关闭所有标签页请求');
+    closeAllOperationTabs(request.operationId)
+      .then((result: { closedCount: number; errors: string[] }) => {
+        console.log('关闭标签页成功:', result);
+        sendResponse({
+          success: true,
+          message: `成功关闭 ${result.closedCount} 个标签页`,
+          closedCount: result.closedCount,
+          errors: result.errors,
+        });
+      })
+      .catch((error: Error) => {
+        console.error('关闭标签页失败:', error);
+        sendResponse({ success: false, error: error.message });
+      });
     return true;
   }
 

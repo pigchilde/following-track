@@ -445,6 +445,21 @@ const SidePanel = () => {
       }
     }
 
+    // 停止操作时也关闭所有标签页
+    console.log('停止操作，开始关闭所有标签页...');
+    try {
+      const closeResult = await closeAllTabs();
+      if (closeResult.success && closeResult.closedCount > 0) {
+        console.log(`✅ 停止时成功关闭了 ${closeResult.closedCount} 个标签页`);
+      } else if (closeResult.closedCount === 0) {
+        console.log('📝 停止时没有需要关闭的标签页');
+      } else {
+        console.warn('⚠️ 停止时关闭标签页出现部分错误:', closeResult.errors);
+      }
+    } catch (closeError) {
+      console.error('❌ 停止时关闭标签页失败:', closeError);
+    }
+
     operationIdRef.current = null;
     baseOperationIdRef.current = null;
     setProgress('操作已停止');
@@ -1027,6 +1042,22 @@ const SidePanel = () => {
         console.log(completionMessage);
         console.log('最终统计详情:', finalStats);
 
+        // 在每轮完成后自动关闭所有标签页
+        console.log(`第 ${currentRound} 轮完成，开始关闭所有标签页...`);
+        try {
+          const closeResult = await closeAllTabs();
+          if (closeResult.success && closeResult.closedCount > 0) {
+            console.log(`✅ 成功关闭了 ${closeResult.closedCount} 个标签页`);
+            setProgress(prev => `${prev}\n🗂️ 已自动关闭 ${closeResult.closedCount} 个标签页`);
+          } else if (closeResult.closedCount === 0) {
+            console.log('📝 没有需要关闭的标签页');
+          } else {
+            console.warn('⚠️ 关闭标签页时出现部分错误:', closeResult.errors);
+          }
+        } catch (closeError) {
+          console.error('❌ 关闭标签页失败:', closeError);
+        }
+
         if (isContinuousMode && !shouldStopRef.current) {
           const intervalSeconds = parseInt(roundInterval, 10);
           if (isNaN(intervalSeconds) || intervalSeconds <= 0) {
@@ -1073,6 +1104,23 @@ const SidePanel = () => {
     } finally {
       if (!isContinuousMode || shouldStopRef.current) {
         console.log(`操作结束，操作ID: ${operationIdRef.current}`);
+
+        // 在非连续模式结束或停止时关闭所有标签页
+        if (!shouldStopRef.current) {
+          // 如果不是因为停止而结束（停止时已经在 stopOperation 中关闭了）
+          console.log('操作正常结束，开始关闭所有标签页...');
+          try {
+            const closeResult = await closeAllTabs();
+            if (closeResult.success && closeResult.closedCount > 0) {
+              console.log(`✅ 操作结束时成功关闭了 ${closeResult.closedCount} 个标签页`);
+            } else if (closeResult.closedCount === 0) {
+              console.log('📝 操作结束时没有需要关闭的标签页');
+            }
+          } catch (closeError) {
+            console.error('❌ 操作结束时关闭标签页失败:', closeError);
+          }
+        }
+
         setIsLoading(false);
         setIsPaused(false);
         setIsRetrying(false);
@@ -1097,6 +1145,45 @@ const SidePanel = () => {
   const clearFailedUsers = () => {
     setFailedUsers([]);
     localStorage.removeItem('failedTwitterUsers');
+  };
+
+  // 关闭所有标签页
+  const closeAllTabs = async (operationId?: string) => {
+    try {
+      console.log(`请求关闭标签页，操作ID: ${operationId || '所有'}`);
+      const response = await chrome.runtime.sendMessage({
+        action: 'closeAllTabs',
+        operationId: operationId,
+      });
+
+      if (response.success) {
+        console.log(`成功关闭 ${response.closedCount} 个标签页`);
+        if (response.errors && response.errors.length > 0) {
+          console.warn('关闭标签页时有部分错误:', response.errors);
+        }
+        return {
+          success: true,
+          closedCount: response.closedCount,
+          errors: response.errors || [],
+        };
+      } else {
+        console.error('关闭标签页失败:', response.error);
+        return {
+          success: false,
+          error: response.error,
+          closedCount: 0,
+          errors: [response.error],
+        };
+      }
+    } catch (error) {
+      console.error('关闭标签页请求失败:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : '未知错误',
+        closedCount: 0,
+        errors: [error instanceof Error ? error.message : '未知错误'],
+      };
+    }
   };
 
   // 手动清除站点数据
@@ -1548,34 +1635,28 @@ const SidePanel = () => {
                   )}>
                   🧹 清除站点数据
                 </button>
-
                 <button
-                  onClick={() => {
-                    const userConfirmed = confirm(
-                      '如果普通清除无效，建议执行以下强力清除步骤：\n\n' +
-                        '1. 关闭所有 Twitter/X 标签页\n' +
-                        '2. 打开 Chrome 开发者工具 (F12)\n' +
-                        '3. 转到 Application → Storage → IndexedDB\n' +
-                        '4. 手动删除所有 Twitter 相关数据库\n' +
-                        '5. 或者重启 Chrome 浏览器\n' +
-                        '6. 清除 Chrome 浏览器缓存和数据\n\n' +
-                        '是否要打开 Chrome 的清除数据页面？',
-                    );
-
-                    if (userConfirmed) {
-                      chrome.tabs.create({
-                        url: 'chrome://settings/clearBrowserData',
-                        active: true,
-                      });
+                  onClick={async () => {
+                    try {
+                      const result = await closeAllTabs();
+                      if (result.success && result.closedCount > 0) {
+                        setProgress(`🗂️ 手动关闭了 ${result.closedCount} 个标签页`);
+                      } else if (result.closedCount === 0) {
+                        setProgress('📝 没有需要关闭的标签页');
+                      } else {
+                        setProgress(`⚠️ 关闭标签页时出现错误: ${result.errors.join(', ')}`);
+                      }
+                    } catch (error) {
+                      setProgress(`❌ 关闭标签页失败: ${error instanceof Error ? error.message : '未知错误'}`);
                     }
                   }}
                   className={cn(
-                    'rounded-lg px-3 py-2 text-sm font-medium shadow transition-all duration-200',
+                    'flex-1 rounded-lg px-3 py-2 text-sm font-medium shadow transition-all duration-200',
                     isLight
-                      ? 'bg-red-500 text-white hover:bg-red-600 hover:shadow-md'
-                      : 'bg-red-600 text-white hover:bg-red-700 hover:shadow-md',
+                      ? 'bg-orange-500 text-white hover:bg-orange-600 hover:shadow-md'
+                      : 'bg-orange-600 text-white hover:bg-orange-700 hover:shadow-md',
                   )}>
-                  💪 强力清除
+                  🗂️ 关闭标签页
                 </button>
               </div>
             )}
