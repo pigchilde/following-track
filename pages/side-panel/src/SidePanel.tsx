@@ -82,6 +82,16 @@ const SidePanel = () => {
     skipped: 0,
   });
 
+  // 重试模式的独立统计数据
+  const [retryStats, setRetryStats] = useState<ProcessStats>({
+    total: 0,
+    processed: 0,
+    successful: 0,
+    failed: 0,
+    changed: 0,
+    skipped: 0,
+  });
+
   // 添加清除站点数据的状态
   const [clearSiteDataStatus, setClearSiteDataStatus] = useState<{
     show: boolean;
@@ -95,6 +105,16 @@ const SidePanel = () => {
   const countdownTimerRef = useRef<NodeJS.Timeout | null>(null);
   const baseOperationIdRef = useRef<string | null>(null);
   const statsRef = useRef<ProcessStats>({
+    total: 0,
+    processed: 0,
+    successful: 0,
+    failed: 0,
+    changed: 0,
+    skipped: 0,
+  });
+
+  // 重试模式统计数据的引用
+  const retryStatsRef = useRef<ProcessStats>({
     total: 0,
     processed: 0,
     successful: 0,
@@ -289,6 +309,97 @@ const SidePanel = () => {
     return await response.json();
   };
 
+  const fetchUserById = async (id: number): Promise<TwitterUser | null> => {
+    try {
+      console.log(`获取用户详细信息，ID: ${id}`);
+      // 尝试多页查询来找到特定用户，提高查找效率
+      for (let page = 1; page <= 5; page++) {
+        const response = await fetch(`http://${apiServerHost}/open/crawler/twitter_smart_user/page`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ page, size: 50 }), // 每页50个用户
+        });
+
+        if (!response.ok) {
+          throw new Error(`请求失败: ${response.status}`);
+        }
+
+        const result: ApiResponse = await response.json();
+        const user = result.data.list.find(u => u.id === id);
+
+        if (user) {
+          console.log(`✅ 成功获取用户 ${user.screenName} 的详细信息，followingCount: ${user.followingCount}`);
+          return user;
+        }
+
+        // 如果当前页没有更多数据，停止查询
+        if (result.data.list.length < 50) {
+          break;
+        }
+      }
+
+      console.warn(`⚠️ 未找到ID为 ${id} 的用户`);
+      return null;
+    } catch (error) {
+      console.error(`获取用户 ${id} 详细信息失败:`, error);
+      return null;
+    }
+  };
+
+  const fetchUsersForRetry = async (failedUserIds: number[]): Promise<Map<number, TwitterUser>> => {
+    const userMap = new Map<number, TwitterUser>();
+
+    try {
+      console.log(`🔍 批量获取 ${failedUserIds.length} 个失败用户的最新数据...`);
+
+      // 批量查询，最多查询前5页来覆盖大部分用户
+      for (let page = 1; page <= 5; page++) {
+        console.log(`查询第 ${page} 页数据...`);
+        const response = await fetch(`http://${apiServerHost}/open/crawler/twitter_smart_user/page`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ page, size: 50 }),
+        });
+
+        if (!response.ok) {
+          console.warn(`第 ${page} 页查询失败: ${response.status}`);
+          continue;
+        }
+
+        const result: ApiResponse = await response.json();
+
+        // 查找失败用户
+        result.data.list.forEach(user => {
+          if (failedUserIds.includes(user.id)) {
+            userMap.set(user.id, user);
+            console.log(`✅ 找到用户 ${user.screenName} (ID:${user.id}) followingCount: ${user.followingCount}`);
+          }
+        });
+
+        // 如果当前页没有更多数据，停止查询
+        if (result.data.list.length < 50) {
+          break;
+        }
+
+        // 如果已经找到所有用户，提前退出
+        if (userMap.size === failedUserIds.length) {
+          console.log(`✅ 已找到所有 ${failedUserIds.length} 个失败用户的数据`);
+          break;
+        }
+      }
+
+      console.log(`🔍 批量查询完成，找到 ${userMap.size}/${failedUserIds.length} 个用户的数据`);
+      return userMap;
+    } catch (error) {
+      console.error(`批量获取用户数据失败:`, error);
+      return userMap;
+    }
+  };
+
   const getFollowingCountFromTwitter = async (
     screenName: string,
     operationId: string,
@@ -467,6 +578,60 @@ const SidePanel = () => {
     setCurrentRound(1);
   };
 
+  // 辅助函数：更新统计数据
+  const updateStats = (isRetryMode: boolean, updates: Partial<ProcessStats>) => {
+    if (isRetryMode) {
+      setRetryStats(prev => ({ ...prev, ...updates }));
+      retryStatsRef.current = { ...retryStatsRef.current, ...updates };
+    } else {
+      setStats(prev => ({ ...prev, ...updates }));
+      statsRef.current = { ...statsRef.current, ...updates };
+    }
+  };
+
+  // 辅助函数：增量更新统计数据
+  const incrementStats = (isRetryMode: boolean, increments: Partial<ProcessStats>) => {
+    if (isRetryMode) {
+      setRetryStats(prev => ({
+        ...prev,
+        total: prev.total + (increments.total || 0),
+        processed: prev.processed + (increments.processed || 0),
+        successful: prev.successful + (increments.successful || 0),
+        failed: prev.failed + (increments.failed || 0),
+        changed: prev.changed + (increments.changed || 0),
+        skipped: prev.skipped + (increments.skipped || 0),
+      }));
+      retryStatsRef.current = {
+        ...retryStatsRef.current,
+        total: retryStatsRef.current.total + (increments.total || 0),
+        processed: retryStatsRef.current.processed + (increments.processed || 0),
+        successful: retryStatsRef.current.successful + (increments.successful || 0),
+        failed: retryStatsRef.current.failed + (increments.failed || 0),
+        changed: retryStatsRef.current.changed + (increments.changed || 0),
+        skipped: retryStatsRef.current.skipped + (increments.skipped || 0),
+      };
+    } else {
+      setStats(prev => ({
+        ...prev,
+        total: prev.total + (increments.total || 0),
+        processed: prev.processed + (increments.processed || 0),
+        successful: prev.successful + (increments.successful || 0),
+        failed: prev.failed + (increments.failed || 0),
+        changed: prev.changed + (increments.changed || 0),
+        skipped: prev.skipped + (increments.skipped || 0),
+      }));
+      statsRef.current = {
+        ...statsRef.current,
+        total: statsRef.current.total + (increments.total || 0),
+        processed: statsRef.current.processed + (increments.processed || 0),
+        successful: statsRef.current.successful + (increments.successful || 0),
+        failed: statsRef.current.failed + (increments.failed || 0),
+        changed: statsRef.current.changed + (increments.changed || 0),
+        skipped: statsRef.current.skipped + (increments.skipped || 0),
+      };
+    }
+  };
+
   const processSingleUser = async (
     user: TwitterUser,
     operationId: string,
@@ -508,15 +673,15 @@ const SidePanel = () => {
       if (currentFollowingCount === -1) {
         const error = '无法获取关注数据';
         console.error(`用户 ${user.screenName} ${error}`);
-        if (!isRetryMode) {
-          saveFailedUser(user, error);
+        // 重试模式下失败的用户也要记录，等待下一轮重试
+        saveFailedUser(user, error);
+
+        if (isRetryMode) {
+          incrementStats(true, { processed: 1, failed: 1 });
+        } else {
+          incrementStats(false, { processed: 1, failed: 1 });
         }
-        setStats(prev => ({ ...prev, processed: prev.processed + 1, failed: prev.failed + 1 }));
-        statsRef.current = {
-          ...statsRef.current,
-          processed: statsRef.current.processed + 1,
-          failed: statsRef.current.failed + 1,
-        };
+
         setProgress(`用户 ${user.screenName} (ID: ${user.id}) 处理失败: ${error}`);
         return null;
       }
@@ -537,11 +702,7 @@ const SidePanel = () => {
       console.log(`- 不等比较 (!=): ${currentFollowingCount != userFollowingCount}`);
       console.log(`- 严格不等比较 (!==): ${currentFollowingCount !== userFollowingCount}`);
 
-      setStats(prev => ({ ...prev, processed: prev.processed + 1 }));
-      statsRef.current = {
-        ...statsRef.current,
-        processed: statsRef.current.processed + 1,
-      };
+      incrementStats(isRetryMode, { processed: 1 });
 
       if (currentFollowingCount !== userFollowingCount) {
         console.log(`🔄 检测到关注数变化，准备验证变化幅度...`);
@@ -571,15 +732,9 @@ const SidePanel = () => {
             if (verifyFollowingCount === -1) {
               const error = '验证时无法获取关注数据';
               console.error(`用户 ${user.screenName} ${error}`);
-              if (!isRetryMode) {
-                saveFailedUser(user, error);
-              }
-              setStats(prev => ({ ...prev, processed: prev.processed + 1, failed: prev.failed + 1 }));
-              statsRef.current = {
-                ...statsRef.current,
-                processed: statsRef.current.processed + 1,
-                failed: statsRef.current.failed + 1,
-              };
+              // 重试模式下失败的用户也要记录，等待下一轮重试
+              saveFailedUser(user, error);
+              incrementStats(true, { processed: 1, failed: 1 });
               setProgress(`用户 ${user.screenName} (ID: ${user.id}) 验证失败: ${error}`);
               return null;
             }
@@ -591,15 +746,9 @@ const SidePanel = () => {
             if (verifyFollowingCount === currentFollowingCount && verifyChangeAmount > threshold) {
               console.warn(`❌ 用户 ${user.screenName} 两次获取结果一致但变化幅度仍然异常，标记为可疑数据`);
               const error = `关注数变化异常: ${userFollowingCount} → ${currentFollowingCount} (变化${changeAmount}人)`;
-              if (!isRetryMode) {
-                saveFailedUser(user, error);
-              }
-              setStats(prev => ({ ...prev, processed: prev.processed + 1, failed: prev.failed + 1 }));
-              statsRef.current = {
-                ...statsRef.current,
-                processed: statsRef.current.processed + 1,
-                failed: statsRef.current.failed + 1,
-              };
+              // 重试模式下失败的用户也要记录，等待下一轮重试
+              saveFailedUser(user, error);
+              incrementStats(true, { processed: 1, failed: 1 });
               setProgress(`用户 ${user.screenName} (ID: ${user.id}) 数据异常: ${error}`);
               return null;
             }
@@ -616,27 +765,30 @@ const SidePanel = () => {
               if (finalChangeAmount > threshold) {
                 console.warn(`❌ 用户 ${user.screenName} 验证后变化幅度仍然异常: ${finalChangeAmount} 人`);
                 const error = `验证后关注数变化仍异常: ${userFollowingCount} → ${finalFollowingCount} (变化${finalChangeAmount}人)`;
-                if (!isRetryMode) {
-                  saveFailedUser(user, error);
-                }
-                setStats(prev => ({ ...prev, processed: prev.processed + 1, failed: prev.failed + 1 }));
-                statsRef.current = {
-                  ...statsRef.current,
-                  processed: statsRef.current.processed + 1,
-                  failed: statsRef.current.failed + 1,
-                };
+                // 重试模式下失败的用户也要记录，等待下一轮重试
+                saveFailedUser(user, error);
+                incrementStats(true, { processed: 1, failed: 1 });
                 setProgress(`用户 ${user.screenName} (ID: ${user.id}) 验证后数据仍异常: ${error}`);
                 return null;
               }
 
               // 使用验证后的数据更新
               try {
-                if (finalNewAdditions > 0) {
+                // 在重试模式下，任何变化都要更新数据库；在正常模式下，只有增加时才更新
+                const shouldUpdate = isRetryMode ? finalNewAdditions !== 0 : finalNewAdditions > 0;
+
+                if (shouldUpdate) {
                   console.log(
-                    `📞 使用验证数据调用 updateUser(${user.id}, ${finalFollowingCount}, ${finalNewAdditions})...`,
+                    `📞 使用验证数据${isRetryMode ? '(重试模式)' : ''}调用 updateUser(${user.id}, ${finalFollowingCount}, ${finalNewAdditions})...`,
                   );
                   await updateUser(user.id, finalFollowingCount, finalNewAdditions);
-                  console.log(`✅ 成功更新用户 ${user.screenName} 的数据库记录(验证后)`);
+                  console.log(
+                    `✅ 成功更新用户 ${user.screenName} 的数据库记录(验证后${isRetryMode ? '-重试模式' : ''})`,
+                  );
+                } else {
+                  console.log(
+                    `📝 验证后${isRetryMode ? '重试模式下无变化' : '正常模式下非增长变化'}，跳过数据库更新 - ${user.screenName}`,
+                  );
                 }
               } catch (updateError) {
                 console.error(`❌ 更新用户 ${user.screenName} 数据库记录失败:`, updateError);
@@ -653,24 +805,14 @@ const SidePanel = () => {
                   setFailedUsers(updatedFailedUsers);
                 }
 
-                setStats(prev => ({ ...prev, successful: prev.successful + 1, skipped: prev.skipped + 1 }));
-                statsRef.current = {
-                  ...statsRef.current,
-                  successful: statsRef.current.successful + 1,
-                  skipped: statsRef.current.skipped + 1,
-                };
+                incrementStats(isRetryMode, { successful: 1, skipped: 1 });
 
                 return null; // 不返回changeInfo，因为验证后实际没有变化
               }
 
               const changeInfo = `${user.screenName} (ID: ${user.id}): ${userFollowingCount} → ${finalFollowingCount} (${finalNewAdditions > 0 ? '+' : ''}${finalNewAdditions}) [已验证]`;
 
-              setStats(prev => ({ ...prev, successful: prev.successful + 1, changed: prev.changed + 1 }));
-              statsRef.current = {
-                ...statsRef.current,
-                successful: statsRef.current.successful + 1,
-                changed: statsRef.current.changed + 1,
-              };
+              incrementStats(isRetryMode, { successful: 1, changed: 1 });
 
               console.log(
                 `用户 ${user.screenName} 关注数从 ${userFollowingCount} 变为 ${finalFollowingCount} (已验证)`,
@@ -699,12 +841,7 @@ const SidePanel = () => {
                 setFailedUsers(updatedFailedUsers);
               }
 
-              setStats(prev => ({ ...prev, successful: prev.successful + 1, skipped: prev.skipped + 1 }));
-              statsRef.current = {
-                ...statsRef.current,
-                successful: statsRef.current.successful + 1,
-                skipped: statsRef.current.skipped + 1,
-              };
+              incrementStats(isRetryMode, { successful: 1, skipped: 1 });
 
               return null; // 不返回changeInfo，因为验证后实际没有变化
             }
@@ -714,12 +851,7 @@ const SidePanel = () => {
             if (!isRetryMode) {
               saveFailedUser(user, error);
             }
-            setStats(prev => ({ ...prev, processed: prev.processed + 1, failed: prev.failed + 1 }));
-            statsRef.current = {
-              ...statsRef.current,
-              processed: statsRef.current.processed + 1,
-              failed: statsRef.current.failed + 1,
-            };
+            incrementStats(false, { processed: 1, failed: 1 });
             setProgress(`用户 ${user.screenName} (ID: ${user.id}) 验证失败: ${error}`);
             return null;
           }
@@ -727,10 +859,19 @@ const SidePanel = () => {
 
         // 正常更新数据库
         try {
-          if (newAdditions > 0) {
-            console.log(`📞 正在调用 updateUser(${user.id}, ${currentFollowingCount}, ${newAdditions})...`);
+          // 在重试模式下，任何变化都要更新数据库；在正常模式下，只有增加时才更新
+          const shouldUpdate = isRetryMode ? newAdditions !== 0 : newAdditions > 0;
+
+          if (shouldUpdate) {
+            console.log(
+              `📞 ${isRetryMode ? '重试模式' : '正常模式'}调用 updateUser(${user.id}, ${currentFollowingCount}, ${newAdditions})...`,
+            );
             await updateUser(user.id, currentFollowingCount, newAdditions);
-            console.log(`✅ 成功更新用户 ${user.screenName} 的数据库记录`);
+            console.log(`✅ 成功更新用户 ${user.screenName} 的数据库记录${isRetryMode ? '(重试模式)' : ''}`);
+          } else {
+            console.log(
+              `📝 ${isRetryMode ? '重试模式下无变化' : '正常模式下非增长变化'}，跳过数据库更新 - ${user.screenName}`,
+            );
           }
         } catch (updateError) {
           console.error(`❌ 更新用户 ${user.screenName} 数据库记录失败:`, updateError);
@@ -747,24 +888,14 @@ const SidePanel = () => {
             setFailedUsers(updatedFailedUsers);
           }
 
-          setStats(prev => ({ ...prev, successful: prev.successful + 1, skipped: prev.skipped + 1 }));
-          statsRef.current = {
-            ...statsRef.current,
-            successful: statsRef.current.successful + 1,
-            skipped: statsRef.current.skipped + 1,
-          };
+          incrementStats(isRetryMode, { successful: 1, skipped: 1 });
 
           return null; // 不返回changeInfo，因为实际没有变化
         }
 
         const changeInfo = `${user.screenName} (ID: ${user.id}): ${userFollowingCount} → ${currentFollowingCount} (${newAdditions > 0 ? '+' : ''}${newAdditions})`;
 
-        setStats(prev => ({ ...prev, successful: prev.successful + 1, changed: prev.changed + 1 }));
-        statsRef.current = {
-          ...statsRef.current,
-          successful: statsRef.current.successful + 1,
-          changed: statsRef.current.changed + 1,
-        };
+        incrementStats(isRetryMode, { successful: 1, changed: 1 });
 
         console.log(`用户 ${user.screenName} 关注数从 ${userFollowingCount} 变为 ${currentFollowingCount}`);
 
@@ -788,12 +919,7 @@ const SidePanel = () => {
           localStorage.setItem('failedTwitterUsers', JSON.stringify(updatedFailedUsers));
           setFailedUsers(updatedFailedUsers);
         }
-        setStats(prev => ({ ...prev, successful: prev.successful + 1, skipped: prev.skipped + 1 }));
-        statsRef.current = {
-          ...statsRef.current,
-          successful: statsRef.current.successful + 1,
-          skipped: statsRef.current.skipped + 1,
-        };
+        incrementStats(isRetryMode, { successful: 1, skipped: 1 });
       }
 
       return null;
@@ -806,16 +932,10 @@ const SidePanel = () => {
       console.error(`处理用户 ${user.screenName} 时出错:`, error);
       const errorMsg = error instanceof Error ? error.message : '未知错误';
 
-      if (!isRetryMode) {
-        saveFailedUser(user, errorMsg);
-      }
+      // 重试模式下失败的用户也要记录，等待下一轮重试
+      saveFailedUser(user, errorMsg);
 
-      setStats(prev => ({ ...prev, processed: prev.processed + 1, failed: prev.failed + 1 }));
-      statsRef.current = {
-        ...statsRef.current,
-        processed: statsRef.current.processed + 1,
-        failed: statsRef.current.failed + 1,
-      };
+      incrementStats(false, { processed: 1, failed: 1 });
       setProgress(`处理 ${user.screenName} (ID: ${user.id}) 时出错: ${errorMsg}`);
 
       return null;
@@ -941,6 +1061,216 @@ const SidePanel = () => {
     return retryResults;
   };
 
+  // 分组处理失败用户（10个用户为一组）
+  const processFailedUsersInGroups = async (): Promise<string[]> => {
+    // 在函数开始时立即获取当前失败用户数据，确保与外部调用时的数据一致
+    const currentFailedUsers = JSON.parse(localStorage.getItem('failedTwitterUsers') || '[]') as FailedUser[];
+
+    console.log(`📊 processFailedUsersInGroups 数据一致性检查: 函数内获取到 ${currentFailedUsers.length} 个失败用户`);
+    console.log(`🔍 失败用户详情:`, currentFailedUsers.map(u => `${u.screenName}(ID:${u.id})`).join(', '));
+
+    if (currentFailedUsers.length === 0) {
+      console.log('没有需要重试的失败用户');
+      return [];
+    }
+
+    console.log(`开始分组处理 ${currentFailedUsers.length} 个失败用户，每组10个用户`);
+    setIsRetrying(true);
+
+    // 初始化重试统计数据
+    const initialRetryStats = {
+      total: currentFailedUsers.length,
+      processed: 0,
+      successful: 0,
+      failed: 0,
+      changed: 0,
+      skipped: 0,
+    };
+    setRetryStats(initialRetryStats);
+    retryStatsRef.current = initialRetryStats;
+
+    // 批量获取所有失败用户的最新数据
+    const failedUserIds = currentFailedUsers.map(u => u.id);
+    console.log(`🔄 开始批量获取 ${failedUserIds.length} 个失败用户的最新数据...`);
+    setProgress(prev => `${prev}\n🔄 批量获取失败用户最新数据中...`);
+
+    const userDataMap = await fetchUsersForRetry(failedUserIds);
+    console.log(`✅ 批量数据获取完成，成功获取 ${userDataMap.size}/${failedUserIds.length} 个用户的最新数据`);
+
+    const allRetryResults: string[] = [];
+    const groupSize = 10;
+    const totalGroups = Math.ceil(currentFailedUsers.length / groupSize);
+
+    console.log(
+      `📋 分组计划: 总共 ${currentFailedUsers.length} 个用户，每组 ${groupSize} 个，共分为 ${totalGroups} 组`,
+    );
+
+    let retryOperationId: string;
+    if (isContinuousMode && baseOperationIdRef.current) {
+      retryOperationId = `${baseOperationIdRef.current}-retry`;
+    } else {
+      retryOperationId = `${operationIdRef.current}-retry`;
+    }
+
+    console.log(`失败用户重试操作ID: ${retryOperationId}, 总共分为 ${totalGroups} 组`);
+
+    // 创建所有组的处理Promise，实现并行处理
+    const groupProcessingPromises: Promise<string[]>[] = [];
+
+    for (let groupIndex = 0; groupIndex < totalGroups; groupIndex++) {
+      const startIndex = groupIndex * groupSize;
+      const endIndex = Math.min(startIndex + groupSize, currentFailedUsers.length);
+      const groupUsers = currentFailedUsers.slice(startIndex, endIndex);
+
+      // 为每组创建独立的操作ID，确保每组使用独立的标签页
+      const groupOperationId = `${retryOperationId}-group-${groupIndex + 1}`;
+
+      console.log(`🔄 准备第 ${groupIndex + 1}/${totalGroups} 组失败用户处理，包含 ${groupUsers.length} 个用户`);
+      console.log(
+        `📋 第 ${groupIndex + 1} 组用户列表: ${groupUsers.map(u => `${u.screenName}(ID:${u.id})`).join(', ')}`,
+      );
+      console.log(`📊 第 ${groupIndex + 1} 组使用独立操作ID: ${groupOperationId}`);
+
+      // 创建组处理函数
+      const processGroup = async (gIndex: number, gUsers: FailedUser[], gOperationId: string): Promise<string[]> => {
+        console.log(`🚀 第 ${gIndex + 1} 组开始并行处理...`);
+        setProgress(prev => `${prev}\n🔄 第 ${gIndex + 1}/${totalGroups} 组开始处理 (${gUsers.length} 个用户)...`);
+
+        const groupRetryResults: string[] = [];
+
+        for (let i = 0; i < gUsers.length; i++) {
+          if (shouldStopRef.current) break;
+
+          const failedUser = gUsers[i];
+          const isFirstUserInGroup = i === 0;
+
+          // 每组的第一个用户创建新标签页，组内其他用户复用标签页
+          const reuseTab = isFirstUserInGroup ? false : true;
+
+          console.log(
+            `重试用户 ${failedUser.screenName} (组${gIndex + 1}/${totalGroups}, 用户${i + 1}/${gUsers.length}): 复用标签页=${reuseTab}${isFirstUserInGroup ? ' [组首用户-新标签页]' : ' [组内用户-复用标签页]'}`,
+          );
+
+          // 在每组第一个用户处理前，明确标签页策略
+          if (isFirstUserInGroup) {
+            console.log(`🚀 第 ${gIndex + 1} 组开始处理，组首用户 ${failedUser.screenName} 将创建新标签页`);
+            console.log(`📊 操作ID: ${gOperationId}, reuseTab: ${reuseTab}`);
+          }
+
+          // 使用批量获取的用户数据
+          const latestUserData = userDataMap.get(failedUser.id);
+
+          let userForRetry: TwitterUser;
+          if (latestUserData) {
+            // 使用从API获取的最新数据
+            userForRetry = latestUserData;
+            console.log(
+              `✅ 使用批量获取的最新数据: ${failedUser.screenName} followingCount=${latestUserData.followingCount}`,
+            );
+          } else {
+            // 如果批量获取中没有找到，尝试单独获取
+            console.warn(`⚠️ 批量获取中未找到 ${failedUser.screenName} 的数据，尝试单独获取...`);
+            const singleUserData = await fetchUserById(failedUser.id);
+
+            if (singleUserData) {
+              userForRetry = singleUserData;
+              console.log(`✅ 单独获取成功: ${failedUser.screenName} followingCount=${singleUserData.followingCount}`);
+            } else {
+              // 如果都获取失败，使用失败列表中的基本信息，但followingCount设为0（这种情况下会有问题，但至少能继续处理）
+              console.warn(`⚠️ 无法获取 ${failedUser.screenName} 的最新数据，使用基本信息但followingCount=0`);
+              userForRetry = {
+                id: failedUser.id,
+                screenName: failedUser.screenName,
+                name: failedUser.name,
+                followingCount: 0, // 如果API获取失败，这里的0会导致对比问题
+                createTime: '',
+                updateTime: '',
+                profileImageUrl: '',
+                followersCount: '',
+                createdAt: '',
+                classification: '',
+                followersChange: '',
+                tenantId: null,
+                friendsCount: '',
+                score: '',
+                smartFollowers: '',
+                newAdditions: 0,
+              };
+            }
+          }
+
+          const result = await processSingleUser(
+            userForRetry,
+            gOperationId, // 使用组专用的操作ID
+            true,
+            reuseTab,
+          );
+          if (result) {
+            groupRetryResults.push(result);
+          }
+
+          // 组内用户之间的延迟
+          if (i < gUsers.length - 1 && !shouldStopRef.current) {
+            const waitTime =
+              Math.floor(
+                Math.random() * (parseInt(randomDelayMax, 10) - parseInt(randomDelayMin, 10) + 1) +
+                  parseInt(randomDelayMin, 10),
+              ) * 1000;
+            console.log(`失败用户 ${failedUser.screenName} 重试完成，等待 ${waitTime / 1000} 秒后处理下一个用户...`);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+          }
+        }
+
+        console.log(
+          `✅ 第 ${gIndex + 1}/${totalGroups} 组处理完成，发现 ${groupRetryResults.length} 个用户关注数有变化`,
+        );
+        setProgress(prev => `${prev}\n✅ 第 ${gIndex + 1} 组完成，发现 ${groupRetryResults.length} 个变化`);
+
+        return groupRetryResults;
+      };
+
+      // 将组处理Promise加入数组
+      groupProcessingPromises.push(processGroup(groupIndex, groupUsers, groupOperationId));
+    }
+
+    console.log(`🚀 开始并行处理 ${totalGroups} 个组，每组独立创建标签页...`);
+    setProgress(prev => `${prev}\n🚀 ${totalGroups} 个组开始并行处理...`);
+
+    // 并行等待所有组完成
+    try {
+      const allGroupResults = await Promise.all(groupProcessingPromises);
+
+      // 合并所有组的结果
+      allGroupResults.forEach(groupResult => {
+        allRetryResults.push(...groupResult);
+      });
+
+      console.log(`🎉 所有 ${totalGroups} 个组并行处理完成`);
+      setProgress(prev => `${prev}\n🎉 所有组并行处理完成`);
+    } catch (error) {
+      console.error('并行处理组时出错:', error);
+      setProgress(prev => `${prev}\n❌ 并行处理出现错误: ${error instanceof Error ? error.message : '未知错误'}`);
+    }
+
+    setIsRetrying(false);
+    console.log(`所有失败用户分组处理完成，总共发现 ${allRetryResults.length} 个用户关注数有变化`);
+    console.log(`🔍 重试处理详细统计:`);
+    console.log(`- 总处理用户: ${retryStatsRef.current.total} 个`);
+    console.log(`- 成功处理: ${retryStatsRef.current.successful} 个`);
+    console.log(`- 处理失败: ${retryStatsRef.current.failed} 个`);
+    console.log(`- 发现变化: ${retryStatsRef.current.changed} 个`);
+    console.log(`- 无变化: ${retryStatsRef.current.skipped} 个`);
+    console.log(`- 变化用户列表: [${allRetryResults.join(', ')}]`);
+
+    if (allRetryResults.length > 0) {
+      console.log(
+        `🎉 重试模式下发现 ${allRetryResults.length} 个用户关注数有变化，这些变化已通过updateUser接口更新到数据库`,
+      );
+    }
+
+    return allRetryResults;
+  };
+
   const updateFollowingCounts = async (isNewRound: boolean = false) => {
     if (isLoading && !isNewRound) {
       console.log('已经有操作在进行中，请等待完成或停止当前操作');
@@ -968,7 +1298,7 @@ const SidePanel = () => {
     const roundText = isContinuousMode ? `第 ${currentRound} 轮 - ` : '';
     setProgress(`${roundText}正在获取用户列表...`);
     setCurrentUser(null);
-    setStats({ total: 0, processed: 0, successful: 0, failed: 0, changed: 0, skipped: 0 });
+    updateStats(false, { total: 0, processed: 0, successful: 0, failed: 0, changed: 0, skipped: 0 });
     statsRef.current = { total: 0, processed: 0, successful: 0, failed: 0, changed: 0, skipped: 0 };
 
     let newOperationId: string;
@@ -986,128 +1316,158 @@ const SidePanel = () => {
     console.log(`开始新操作，操作ID: ${newOperationId}，目标处理条数: ${targetNumber}，轮次: ${currentRound}`);
 
     try {
-      let processedFailedUsers = false;
-      if (failedUsers.length > 0 && !shouldStopRef.current) {
-        setProgress(`${roundText}优先重试 ${failedUsers.length} 个失败的用户...`);
-        console.log(`优先重试 ${failedUsers.length} 个失败的用户...`);
+      console.log('正在获取第一页数据...');
+      const firstPageData = await fetchUsers(1, 10);
+      console.log('第一页数据获取成功:', firstPageData);
+      const apiTotal = firstPageData.data.pagination.total;
 
-        setStats(prev => ({ ...prev, total: failedUsers.length }));
-        statsRef.current = { ...statsRef.current, total: failedUsers.length };
+      const actualTotal = Math.min(targetNumber, apiTotal);
+      const totalPages = Math.ceil(actualTotal / 10);
 
-        const retryResults = await retryFailedUsers();
-        console.log(`失败用户重试完成，发现 ${retryResults.length} 个用户关注数有变化`);
+      updateStats(false, { total: actualTotal });
+      statsRef.current = { ...statsRef.current, total: actualTotal };
 
-        if (retryResults.length > 0) {
-          const existingUsers = JSON.parse(localStorage.getItem('newTwitterUsers') || '[]');
-          const updatedUsers = [...retryResults, ...existingUsers];
-          localStorage.setItem('newTwitterUsers', JSON.stringify(updatedUsers));
-          setNewUsers(updatedUsers);
+      setProgress(
+        `${roundText}目标处理 ${targetNumber} 个用户，API总共有 ${apiTotal} 个用户，实际处理 ${actualTotal} 个用户，分 ${totalPages} 组处理...`,
+      );
+      console.log(
+        `目标处理 ${targetNumber} 个用户，API总共有 ${apiTotal} 个用户，实际处理 ${actualTotal} 个用户，分 ${totalPages} 组处理`,
+      );
+
+      const allNewUsers: string[] = [];
+
+      const groupPromises: Promise<string[]>[] = [];
+      const groupStats: { page: number; users: number }[] = [];
+      let processedCount = 0;
+
+      for (let page = 1; page <= totalPages && !shouldStopRef.current && processedCount < actualTotal; page++) {
+        if (shouldStopRef.current) break;
+
+        const processGroup = async (pageNum: number): Promise<string[]> => {
+          setProgress(prev => `${prev}\n${roundText}正在处理第 ${pageNum}/${totalPages} 组...`);
+          console.log(`开始处理第 ${pageNum}/${totalPages} 组...`);
+
+          const pageData = pageNum === 1 ? firstPageData : await fetchUsers(pageNum, 10);
+          let users = pageData.data.list;
+
+          const remainingCount = actualTotal - processedCount;
+          if (users.length > remainingCount) {
+            users = users.slice(0, remainingCount);
+          }
+
+          console.log(
+            `第 ${pageNum} 组有 ${users.length} 个用户（原始 ${pageData.data.list.length} 个，限制后 ${users.length} 个）`,
+          );
+          groupStats.push({ page: pageNum, users: users.length });
+          processedCount += users.length;
+
+          if (users.length > 0) {
+            console.log(`开始处理第 ${pageNum} 组的 ${users.length} 个用户...`);
+            const groupOperationId = `${operationIdRef.current}-group-${pageNum}`;
+            console.log(`第 ${pageNum} 组使用操作ID: ${groupOperationId}，基础操作ID: ${baseOperationIdRef.current}`);
+            // 在连续监听模式的新轮次中，允许第一个用户复用标签页
+            const shouldReuseTabForFirstUser = isContinuousMode && isNewRound;
+            console.log(
+              `第 ${pageNum} 组标签页复用判断: isContinuousMode=${isContinuousMode}, isNewRound=${isNewRound}, shouldReuseTabForFirstUser=${shouldReuseTabForFirstUser}`,
+            );
+            const newUsersInGroup = await processUserGroup(users, groupOperationId, shouldReuseTabForFirstUser);
+            console.log(`第 ${pageNum} 组处理完成，发现 ${newUsersInGroup.length} 个用户关注数有变化`);
+            return newUsersInGroup;
+          }
+
+          return [];
+        };
+
+        groupPromises.push(processGroup(page));
+
+        if (page < totalPages && !shouldStopRef.current && processedCount < actualTotal) {
+          await new Promise(resolve => setTimeout(resolve, 2000));
         }
-
-        processedFailedUsers = true;
       }
 
+      console.log(`等待 ${groupPromises.length} 个分组并行处理完成...`);
+      setProgress(prev => `${prev}\n${roundText}等待 ${groupPromises.length} 个分组并行处理完成...`);
+
+      const results = await Promise.all(groupPromises);
+
+      results.forEach(groupResult => {
+        allNewUsers.push(...groupResult);
+      });
+
+      console.log(`所有分组处理完成，分组情况: ${JSON.stringify(groupStats)}`);
+
+      if (allNewUsers.length > 0) {
+        console.log(`共发现 ${allNewUsers.length} 个用户关注数有变化，保存到本地存储`);
+        const existingUsers = JSON.parse(localStorage.getItem('newTwitterUsers') || '[]');
+        const updatedUsers = [...allNewUsers, ...existingUsers];
+        localStorage.setItem('newTwitterUsers', JSON.stringify(updatedUsers));
+        setNewUsers(updatedUsers);
+      }
+
+      // 正常用户处理完成后，开始处理失败用户
       if (!shouldStopRef.current) {
-        console.log('正在获取第一页数据...');
-        const firstPageData = await fetchUsers(1, 10);
-        console.log('第一页数据获取成功:', firstPageData);
-        const apiTotal = firstPageData.data.pagination.total;
+        // 在处理失败用户前，先获取当前的失败用户数据，确保数据一致性
+        const currentFailedUsers = JSON.parse(localStorage.getItem('failedTwitterUsers') || '[]') as FailedUser[];
+        const finalFailedCount = currentFailedUsers.length;
 
-        const actualTotal = Math.min(targetNumber, apiTotal);
-        const totalPages = Math.ceil(actualTotal / 10);
+        const finalStats = statsRef.current;
+        const completionMessage = `✅ 第 ${currentRound} 轮正常用户处理完成！共处理 ${finalStats.processed} 个用户，成功 ${finalStats.successful}，失败 ${finalStats.failed}，无变化 ${finalStats.skipped}，发现 ${finalStats.changed} 个用户关注数有变化。${finalFailedCount > 0 ? `检测到 ${finalFailedCount} 个失败用户，即将开始重试...` : ''}`;
+        setProgress(completionMessage);
+        console.log(completionMessage);
+        console.log('正常用户处理完成，统计详情:', finalStats);
 
-        const baseStats = processedFailedUsers
-          ? statsRef.current
-          : { total: 0, processed: 0, successful: 0, failed: 0, changed: 0, skipped: 0 };
-        setStats(prev => ({ ...prev, total: baseStats.total + actualTotal }));
-        statsRef.current = { ...statsRef.current, total: baseStats.total + actualTotal };
+        // 在本轮完成后立即处理失败用户
+        if (finalFailedCount > 0 && !shouldStopRef.current) {
+          console.log(
+            `📊 外部调用数据一致性检查: 正常统计显示失败 ${finalStats.failed} 个，localStorage中有 ${finalFailedCount} 个失败用户`,
+          );
+          console.log(`🔍 外部失败用户详情:`, currentFailedUsers.map(u => `${u.screenName}(ID:${u.id})`).join(', '));
+          console.log(`开始处理 ${finalFailedCount} 个失败用户...`);
+          setProgress(prev => `${prev}\n🔄 开始重试 ${finalFailedCount} 个失败用户...`);
 
-        setProgress(
-          `${roundText}目标处理 ${targetNumber} 个用户，API总共有 ${apiTotal} 个用户，实际处理 ${actualTotal} 个用户，分 ${totalPages} 组处理...`,
-        );
-        console.log(
-          `目标处理 ${targetNumber} 个用户，API总共有 ${apiTotal} 个用户，实际处理 ${actualTotal} 个用户，分 ${totalPages} 组处理`,
-        );
-
-        const allNewUsers: string[] = [];
-
-        const groupPromises: Promise<string[]>[] = [];
-        const groupStats: { page: number; users: number }[] = [];
-        let processedCount = 0;
-
-        for (let page = 1; page <= totalPages && !shouldStopRef.current && processedCount < actualTotal; page++) {
-          if (shouldStopRef.current) break;
-
-          const processGroup = async (pageNum: number): Promise<string[]> => {
-            setProgress(prev => `${prev}\n${roundText}正在处理第 ${pageNum}/${totalPages} 组...`);
-            console.log(`开始处理第 ${pageNum}/${totalPages} 组...`);
-
-            const pageData = pageNum === 1 ? firstPageData : await fetchUsers(pageNum, 10);
-            let users = pageData.data.list;
-
-            const remainingCount = actualTotal - processedCount;
-            if (users.length > remainingCount) {
-              users = users.slice(0, remainingCount);
+          // 先关闭其他已成功的标签页
+          console.log('重试失败用户前，先关闭其他已成功的标签页...');
+          setProgress(prev => `${prev}\n🗂️ 关闭其他已成功的标签页中...`);
+          try {
+            const closeResult = await closeAllTabs();
+            if (closeResult.success && closeResult.closedCount > 0) {
+              console.log(`✅ 成功关闭了 ${closeResult.closedCount} 个标签页`);
+              setProgress(prev => `${prev}\n✅ 成功关闭了 ${closeResult.closedCount} 个标签页`);
+            } else if (closeResult.closedCount === 0) {
+              console.log('📝 没有需要关闭的标签页');
+              setProgress(prev => `${prev}\n📝 没有需要关闭的标签页`);
+            } else {
+              console.warn('⚠️ 关闭标签页时出现部分错误:', closeResult.errors);
+              setProgress(prev => `${prev}\n⚠️ 关闭标签页时出现部分错误`);
             }
+          } catch (closeError) {
+            console.error('❌ 关闭标签页失败:', closeError);
+            setProgress(prev => `${prev}\n⚠️ 关闭标签页失败，继续重试用户`);
+          }
 
-            console.log(
-              `第 ${pageNum} 组有 ${users.length} 个用户（原始 ${pageData.data.list.length} 个，限制后 ${users.length} 个）`,
-            );
-            groupStats.push({ page: pageNum, users: users.length });
-            processedCount += users.length;
+          // 等待2秒让标签页关闭完成
+          await new Promise(resolve => setTimeout(resolve, 2000));
 
-            if (users.length > 0) {
-              console.log(`开始处理第 ${pageNum} 组的 ${users.length} 个用户...`);
-              const groupOperationId = `${operationIdRef.current}-group-${pageNum}`;
-              console.log(`第 ${pageNum} 组使用操作ID: ${groupOperationId}，基础操作ID: ${baseOperationIdRef.current}`);
-              // 在连续监听模式的新轮次中，允许第一个用户复用标签页
-              const shouldReuseTabForFirstUser = isContinuousMode && isNewRound;
-              console.log(
-                `第 ${pageNum} 组标签页复用判断: isContinuousMode=${isContinuousMode}, isNewRound=${isNewRound}, shouldReuseTabForFirstUser=${shouldReuseTabForFirstUser}`,
-              );
-              const newUsersInGroup = await processUserGroup(users, groupOperationId, shouldReuseTabForFirstUser);
-              console.log(`第 ${pageNum} 组处理完成，发现 ${newUsersInGroup.length} 个用户关注数有变化`);
-              return newUsersInGroup;
-            }
+          // 处理失败用户
+          const retryResults = await processFailedUsersInGroups();
 
-            return [];
-          };
-
-          groupPromises.push(processGroup(page));
-
-          if (page < totalPages && !shouldStopRef.current && processedCount < actualTotal) {
-            await new Promise(resolve => setTimeout(resolve, 2000));
+          if (retryResults.length > 0) {
+            console.log(`失败用户重试完成，发现 ${retryResults.length} 个用户关注数有变化`);
+            const existingUsers = JSON.parse(localStorage.getItem('newTwitterUsers') || '[]');
+            const updatedUsers = [...retryResults, ...existingUsers];
+            localStorage.setItem('newTwitterUsers', JSON.stringify(updatedUsers));
+            setNewUsers(updatedUsers);
+            setProgress(prev => `${prev}\n✅ 失败用户重试完成，发现 ${retryResults.length} 个用户关注数有变化`);
+          } else {
+            setProgress(prev => `${prev}\n📝 失败用户重试完成，未发现关注数变化`);
           }
         }
 
-        console.log(`等待 ${groupPromises.length} 个分组并行处理完成...`);
-        setProgress(prev => `${prev}\n${roundText}等待 ${groupPromises.length} 个分组并行处理完成...`);
-
-        const results = await Promise.all(groupPromises);
-
-        results.forEach(groupResult => {
-          allNewUsers.push(...groupResult);
-        });
-
-        console.log(`所有分组处理完成，分组情况: ${JSON.stringify(groupStats)}`);
-
-        if (allNewUsers.length > 0) {
-          console.log(`共发现 ${allNewUsers.length} 个用户关注数有变化，保存到本地存储`);
-          const existingUsers = JSON.parse(localStorage.getItem('newTwitterUsers') || '[]');
-          const updatedUsers = [...allNewUsers, ...existingUsers];
-          localStorage.setItem('newTwitterUsers', JSON.stringify(updatedUsers));
-          setNewUsers(updatedUsers);
-        }
-      }
-
-      if (!shouldStopRef.current) {
-        const finalFailedCount = JSON.parse(localStorage.getItem('failedTwitterUsers') || '[]').length;
-
-        const finalStats = statsRef.current;
-        const completionMessage = `✅ 第 ${currentRound} 轮处理完成！共处理 ${finalStats.processed} 个用户，成功 ${finalStats.successful}，失败 ${finalStats.failed}，无变化 ${finalStats.skipped}，发现 ${finalStats.changed} 个用户关注数有变化。${finalFailedCount > 0 ? `还有 ${finalFailedCount} 个用户处理失败。` : ''}`;
-        setProgress(completionMessage);
-        console.log(completionMessage);
-        console.log('最终统计详情:', finalStats);
+        // 获取最终的失败用户数量（重试后可能有变化）
+        const finalFailedCountAfterRetry = JSON.parse(localStorage.getItem('failedTwitterUsers') || '[]').length;
+        const finalCompletionMessage = `✅ 第 ${currentRound} 轮全部处理完成！${finalFailedCountAfterRetry > 0 ? `还有 ${finalFailedCountAfterRetry} 个用户处理失败，将在下一轮继续重试。` : '所有用户处理成功！'}`;
+        setProgress(prev => `${prev}\n${finalCompletionMessage}`);
+        console.log(finalCompletionMessage);
 
         // 在每轮完成后自动关闭所有标签页
         console.log(`第 ${currentRound} 轮完成，开始关闭所有标签页...`);
@@ -1128,12 +1488,10 @@ const SidePanel = () => {
         if (isContinuousMode && !shouldStopRef.current) {
           const intervalSeconds = parseInt(roundInterval, 10);
           if (isNaN(intervalSeconds) || intervalSeconds <= 0) {
-            setProgress(`${completionMessage}\n❌ 无效的轮次间隔时间，停止连续监听`);
+            setProgress(prev => `${prev}\n❌ 无效的轮次间隔时间，停止连续监听`);
             setIsContinuousMode(false);
           } else {
-            setProgress(
-              `${completionMessage}\n⏰ 连续监听模式已启用，${intervalSeconds} 秒后开始第 ${currentRound + 1} 轮`,
-            );
+            setProgress(prev => `${prev}\n⏰ 连续监听模式已启用，${intervalSeconds} 秒后开始第 ${currentRound + 1} 轮`);
 
             startCountdown(intervalSeconds);
 
@@ -1481,6 +1839,7 @@ const SidePanel = () => {
                 'mb-4 rounded-lg border p-3 text-sm',
                 isLight ? 'border-blue-200 bg-blue-50' : 'border-blue-700 bg-blue-900/30',
               )}>
+              <div className="mb-2 font-semibold">📊 正常模式统计</div>
               <div className="grid grid-cols-2 gap-2">
                 <div>总数: {stats.total}</div>
                 <div>已处理: {stats.processed}</div>
@@ -1489,7 +1848,29 @@ const SidePanel = () => {
                 <div>无变化: {stats.skipped}</div>
                 <div>有变化: {stats.changed}</div>
                 <div>进度: {stats.total > 0 ? Math.round((stats.processed / stats.total) * 100) : 0}%</div>
-                <div>{isRetrying ? '重试模式' : '正常模式'}</div>
+                <div>模式: {isRetrying ? '重试模式' : '正常模式'}</div>
+              </div>
+            </div>
+          )}
+
+          {isRetrying && retryStats.total > 0 && (
+            <div
+              className={cn(
+                'mb-4 rounded-lg border p-3 text-sm',
+                isLight ? 'border-orange-200 bg-orange-50' : 'border-orange-700 bg-orange-900/30',
+              )}>
+              <div className="mb-2 font-semibold">🔄 重试模式统计</div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>总数: {retryStats.total}</div>
+                <div>已处理: {retryStats.processed}</div>
+                <div>成功: {retryStats.successful}</div>
+                <div>失败: {retryStats.failed}</div>
+                <div>无变化: {retryStats.skipped}</div>
+                <div>有变化: {retryStats.changed}</div>
+                <div>
+                  进度: {retryStats.total > 0 ? Math.round((retryStats.processed / retryStats.total) * 100) : 0}%
+                </div>
+                <div>分组处理: 10个/组</div>
               </div>
             </div>
           )}
@@ -1638,6 +2019,14 @@ const SidePanel = () => {
                 <div
                   className="h-2 rounded-full bg-blue-600 transition-all duration-300"
                   style={{ width: `${(stats.processed / stats.total) * 100}%` }}></div>
+              </div>
+            )}
+
+            {isRetrying && retryStats.total > 0 && (
+              <div className="h-2 w-full rounded-full bg-gray-200">
+                <div
+                  className="h-2 rounded-full bg-orange-600 transition-all duration-300"
+                  style={{ width: `${(retryStats.processed / retryStats.total) * 100}%` }}></div>
               </div>
             )}
 
