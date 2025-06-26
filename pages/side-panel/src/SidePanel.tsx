@@ -82,6 +82,19 @@ const SidePanel = () => {
     skipped: 0,
   });
 
+  // 新增：代理配置相关状态
+  const [proxyUrl, setProxyUrl] = useState<string>('http://127.0.0.1:9090/proxies/辣条');
+  const [proxyConfig, setProxyConfig] = useState<string>('[{"name": "日本-联通中转"},{"name": "美国-联通中转"}]');
+  const [currentProxy, setCurrentProxy] = useState<string>('');
+
+  // 新增：代理切换通知状态
+  const [proxyChangeStatus, setProxyChangeStatus] = useState<{
+    show: boolean;
+    timestamp: string;
+    proxyName: string;
+    reason: string;
+  } | null>(null);
+
   // 重试模式的独立统计数据
   const [retryStats, setRetryStats] = useState<ProcessStats>({
     total: 0,
@@ -172,6 +185,22 @@ const SidePanel = () => {
       setRandomDelayMax(savedRandomDelayMax);
     }
 
+    // 新增：加载代理配置
+    const savedProxyUrl = localStorage.getItem('proxyUrl');
+    if (savedProxyUrl) {
+      setProxyUrl(savedProxyUrl);
+    }
+
+    const savedProxyConfig = localStorage.getItem('proxyConfig');
+    if (savedProxyConfig) {
+      setProxyConfig(savedProxyConfig);
+    }
+
+    const savedCurrentProxy = localStorage.getItem('currentProxy');
+    if (savedCurrentProxy) {
+      setCurrentProxy(savedCurrentProxy);
+    }
+
     return () => {
       if (countdownTimerRef.current) {
         clearInterval(countdownTimerRef.current);
@@ -239,6 +268,22 @@ const SidePanel = () => {
         setTimeout(() => {
           setClearSiteDataStatus(prev => (prev ? { ...prev, show: false } : null));
         }, 10000);
+      } else if (message.action === 'proxyChanged') {
+        console.log('收到代理切换通知:', message);
+        setProxyChangeStatus({
+          show: true,
+          timestamp: message.timestamp,
+          proxyName: message.proxyName,
+          reason: `已切换到代理: ${message.proxyName} (原因: ${message.reason || '手动切换'})`,
+        });
+
+        // 更新当前代理状态
+        setCurrentProxy(message.proxyName);
+
+        // 5秒后自动隐藏
+        setTimeout(() => {
+          setProxyChangeStatus(prev => (prev ? { ...prev, show: false } : null));
+        }, 5000);
       }
     };
 
@@ -289,6 +334,25 @@ const SidePanel = () => {
     }
   }, [randomDelayMax]);
 
+  // 新增：保存代理配置
+  useEffect(() => {
+    if (proxyUrl.trim()) {
+      localStorage.setItem('proxyUrl', proxyUrl);
+    }
+  }, [proxyUrl]);
+
+  useEffect(() => {
+    if (proxyConfig.trim()) {
+      localStorage.setItem('proxyConfig', proxyConfig);
+    }
+  }, [proxyConfig]);
+
+  useEffect(() => {
+    if (currentProxy.trim()) {
+      localStorage.setItem('currentProxy', currentProxy);
+    }
+  }, [currentProxy]);
+
   const startCountdown = (seconds: number) => {
     setNextRoundCountdown(seconds);
     if (countdownTimerRef.current) {
@@ -322,6 +386,82 @@ const SidePanel = () => {
     console.log(`生成新操作ID: ${id}`);
     setCurrentOperationId(id);
     return id;
+  };
+
+  // 新增：手动切换代理函数
+  const switchProxyManually = async () => {
+    try {
+      console.log('🔄 手动切换代理...');
+      setProgress('🔄 正在切换代理...');
+
+      // 解析代理配置
+      const proxies = JSON.parse(proxyConfig);
+      if (!Array.isArray(proxies) || proxies.length === 0) {
+        throw new Error('代理配置为空或格式错误');
+      }
+
+      // 选择一个不同于当前代理的代理
+      const availableProxies = proxies.filter(proxy => proxy.name !== currentProxy);
+      if (availableProxies.length === 0) {
+        // 如果没有其他代理，重置为第一个代理
+        if (proxies.length > 0) {
+          availableProxies.push(proxies[0]);
+        }
+      }
+
+      if (availableProxies.length === 0) {
+        throw new Error('没有可用的代理');
+      }
+
+      const randomIndex = Math.floor(Math.random() * availableProxies.length);
+      const selectedProxy = availableProxies[randomIndex];
+
+      console.log(`🎯 选择代理: ${selectedProxy.name} (当前: ${currentProxy})`);
+
+      // 构建请求体
+      const requestBody = { name: selectedProxy.name };
+
+      // 发送代理切换请求
+      const response = await fetch(proxyUrl, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody),
+      });
+
+      if (!response.ok) {
+        throw new Error(`代理切换请求失败: ${response.status} ${response.statusText}`);
+      }
+
+      // 检查响应状态
+      const responseText = await response.text();
+      console.log(`✅ 代理切换响应:`, responseText);
+
+      // 更新当前代理状态
+      setCurrentProxy(selectedProxy.name);
+
+      // 显示成功消息
+      setProxyChangeStatus({
+        show: true,
+        timestamp: new Date().toLocaleString(),
+        proxyName: selectedProxy.name,
+        reason: `手动切换代理成功`,
+      });
+
+      setProgress(`✅ 代理已切换到: ${selectedProxy.name}`);
+
+      // 5秒后自动隐藏通知
+      setTimeout(() => {
+        setProxyChangeStatus(prev => (prev ? { ...prev, show: false } : null));
+      }, 5000);
+
+      console.log(`🎉 手动代理切换成功: ${selectedProxy.name}`);
+    } catch (error) {
+      console.error('❌ 手动代理切换失败:', error);
+      const errorMessage = error instanceof Error ? error.message : '未知错误';
+      setProgress(`❌ 代理切换失败: ${errorMessage}`);
+    }
   };
 
   const fetchUsers = async (page: number = 1, size: number = 10): Promise<ApiResponse> => {
@@ -1937,6 +2077,63 @@ const SidePanel = () => {
             </div>
           )}
 
+          {!isLoading && !isRetrying && (
+            <div className="mb-4">
+              <label
+                htmlFor="proxyUrl"
+                className={cn('mb-2 block text-sm font-medium', isLight ? 'text-gray-700' : 'text-gray-300')}>
+                代理切换API地址:
+              </label>
+              <input
+                id="proxyUrl"
+                type="text"
+                value={proxyUrl}
+                onChange={e => setProxyUrl(e.target.value)}
+                placeholder="http://127.0.0.1:9090/proxies/辣条"
+                className={cn(
+                  'w-full rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2',
+                  isLight
+                    ? 'border-gray-300 bg-white text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:ring-blue-500'
+                    : 'border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-400 focus:border-blue-400 focus:ring-blue-400',
+                )}
+              />
+              <p className={cn('mt-1 text-xs', isLight ? 'text-gray-500' : 'text-gray-400')}>
+                代理切换API的完整URL地址
+              </p>
+            </div>
+          )}
+
+          {!isLoading && !isRetrying && (
+            <div className="mb-4">
+              <label
+                htmlFor="proxyConfig"
+                className={cn('mb-2 block text-sm font-medium', isLight ? 'text-gray-700' : 'text-gray-300')}>
+                代理配置列表:
+              </label>
+              <textarea
+                id="proxyConfig"
+                value={proxyConfig}
+                onChange={e => setProxyConfig(e.target.value)}
+                placeholder='[{"name": "日本-联通中转"},{"name": "美国-联通中转"}]'
+                rows={3}
+                className={cn(
+                  'w-full rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2',
+                  isLight
+                    ? 'border-gray-300 bg-white text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:ring-blue-500'
+                    : 'border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-400 focus:border-blue-400 focus:ring-blue-400',
+                )}
+              />
+              <p className={cn('mt-1 text-xs', isLight ? 'text-gray-500' : 'text-gray-400')}>
+                JSON格式的代理配置数组，系统会随机选择一个代理进行切换
+              </p>
+              {currentProxy && (
+                <p className={cn('mt-1 text-xs font-medium', isLight ? 'text-green-600' : 'text-green-400')}>
+                  当前代理: {currentProxy}
+                </p>
+              )}
+            </div>
+          )}
+
           {isContinuousMode && isLoading && (
             <div
               className={cn(
@@ -2217,6 +2414,25 @@ const SidePanel = () => {
               </div>
             )}
 
+            {proxyChangeStatus && proxyChangeStatus.show && (
+              <div
+                className={cn(
+                  'rounded-lg border p-3 text-sm transition-all duration-300',
+                  isLight
+                    ? 'border-indigo-200 bg-indigo-50 text-indigo-800'
+                    : 'border-indigo-700 bg-indigo-900/30 text-indigo-200',
+                )}>
+                <div className="flex items-center gap-2">
+                  <span className="text-lg">🔄</span>
+                  <div>
+                    <div className="font-semibold">代理切换成功</div>
+                    <div className="text-xs opacity-80">时间: {proxyChangeStatus.timestamp}</div>
+                    <div className="text-xs opacity-80">详情: {proxyChangeStatus.reason}</div>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {!isLoading && !isRetrying && (
               <div className="flex gap-2">
                 <button
@@ -2251,6 +2467,21 @@ const SidePanel = () => {
                       : 'bg-orange-600 text-white hover:bg-orange-700 hover:shadow-md',
                   )}>
                   🗂️ 关闭标签页
+                </button>
+              </div>
+            )}
+
+            {!isLoading && !isRetrying && (
+              <div className="mt-2 flex gap-2">
+                <button
+                  onClick={switchProxyManually}
+                  className={cn(
+                    'flex-1 rounded-lg px-3 py-2 text-sm font-medium shadow transition-all duration-200',
+                    isLight
+                      ? 'bg-indigo-500 text-white hover:bg-indigo-600 hover:shadow-md'
+                      : 'bg-indigo-600 text-white hover:bg-indigo-700 hover:shadow-md',
+                  )}>
+                  🔄 切换代理
                 </button>
               </div>
             )}
