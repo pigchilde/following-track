@@ -28,6 +28,19 @@ let retryAttempts = new Map<string, number>(); // 用于记录重试次数
 let tabsMap = new Map<string, number>(); // 存储操作ID到标签页ID的映射
 let currentTabId: number | null = null; // 添加全局变量跟踪当前标签页ID
 
+// 新增：用于存储错误处理期间关闭的标签页信息
+interface ClosedTabInfo {
+  id: number;
+  url: string;
+  operationId: string;
+  screenName?: string;
+  windowId?: number;
+  index?: number;
+}
+
+let closedTabsForRecovery = new Map<string, ClosedTabInfo[]>(); // 按操作ID分组存储被关闭的标签页
+let errorRecoveryInProgress = new Map<string, boolean>(); // 跟踪错误恢复进程状态
+
 // 关闭所有操作相关的标签页
 const closeAllOperationTabs = async (
   operationId?: string,
@@ -83,6 +96,198 @@ const closeAllOperationTabs = async (
     errors.push(errorMsg);
     return { closedCount, errors };
   }
+};
+
+// 新增：保存其他标签页信息并关闭（保留当前出错的标签页）
+const saveAndCloseOtherTabs = async (currentErrorTabId: number, operationId: string): Promise<ClosedTabInfo[]> => {
+  console.log(`保存并关闭除 ${currentErrorTabId} 之外的其他标签页，操作ID: ${operationId}`);
+
+  const closedTabs: ClosedTabInfo[] = [];
+
+  try {
+    // 先检查是否已经有该操作ID的缓存信息，如果有就先清除
+    if (closedTabsForRecovery.has(operationId)) {
+      console.log(`⚠️ 检测到操作ID ${operationId} 已有缓存信息，先清除避免重复`);
+      closedTabsForRecovery.delete(operationId);
+    }
+
+    // 获取所有Twitter相关的标签页
+    const allTabs = await chrome.tabs.query({
+      url: ['*://twitter.com/*', '*://x.com/*', '*://www.twitter.com/*', '*://www.x.com/*'],
+    });
+
+    console.log(`🔍 找到 ${allTabs.length} 个Twitter相关标签页，当前错误标签页ID: ${currentErrorTabId}`);
+
+    for (const tab of allTabs) {
+      // 跳过当前出错的标签页
+      if (tab.id === currentErrorTabId) {
+        console.log(`✅ 保留出错标签页: ${tab.url} (ID: ${tab.id})`);
+        continue;
+      }
+
+      if (tab.id && tab.url) {
+        // 保存标签页信息
+        const closedTabInfo: ClosedTabInfo = {
+          id: tab.id,
+          url: tab.url,
+          operationId: operationId,
+          windowId: tab.windowId,
+          index: tab.index,
+        };
+
+        // 尝试从URL中提取screenName
+        const urlMatch = tab.url.match(/(?:twitter\.com|x\.com)\/([^/?]+)/);
+        if (urlMatch && urlMatch[1]) {
+          closedTabInfo.screenName = urlMatch[1];
+        }
+
+        closedTabs.push(closedTabInfo);
+
+        try {
+          await chrome.tabs.remove(tab.id);
+          console.log(`🗑️ 已关闭并保存标签页: ${tab.url} (ID: ${tab.id})`);
+
+          // 从映射中移除 - 使用更精确的查找方式
+          for (const [opId, tabId] of tabsMap.entries()) {
+            if (tabId === tab.id) {
+              tabsMap.delete(opId);
+              console.log(`🔄 已从映射中移除: ${opId} -> ${tabId}`);
+              break;
+            }
+          }
+        } catch (error) {
+          console.error(`❌ 关闭标签页 ${tab.id} 失败:`, error);
+        }
+      }
+    }
+
+    // 只有在有标签页被关闭时才保存到全局映射中
+    if (closedTabs.length > 0) {
+      closedTabsForRecovery.set(operationId, closedTabs);
+      console.log(`💾 已保存 ${closedTabs.length} 个标签页信息用于恢复，操作ID: ${operationId}`);
+    } else {
+      console.log(`📝 没有需要关闭的标签页，操作ID: ${operationId}`);
+    }
+
+    return closedTabs;
+  } catch (error) {
+    console.error('保存并关闭其他标签页时出错:', error);
+    return closedTabs;
+  }
+};
+
+// 新增：恢复被关闭的标签页
+const recoverClosedTabs = async (operationId: string): Promise<{ recoveredCount: number; errors: string[] }> => {
+  console.log(`🔄 开始恢复操作 ${operationId} 的已关闭标签页`);
+
+  const closedTabs = closedTabsForRecovery.get(operationId) || [];
+  let recoveredCount = 0;
+  const errors: string[] = [];
+
+  if (closedTabs.length === 0) {
+    console.log(`📝 操作ID ${operationId} 没有需要恢复的标签页`);
+    return { recoveredCount: 0, errors: [] };
+  }
+
+  console.log(`📋 准备恢复 ${closedTabs.length} 个标签页`);
+
+  // 在恢复前先检查是否有重复的URL，避免重复恢复
+  const existingTabs = await chrome.tabs.query({
+    url: ['*://twitter.com/*', '*://x.com/*', '*://www.twitter.com/*', '*://www.x.com/*'],
+  });
+
+  const existingUrls = new Set(
+    existingTabs.map(tab => {
+      // 标准化URL，移除查询参数和fragment
+      try {
+        const url = new URL(tab.url || '');
+        return `${url.origin}${url.pathname}`;
+      } catch {
+        return tab.url || '';
+      }
+    }),
+  );
+
+  console.log(`🔍 当前已存在 ${existingUrls.size} 个Twitter标签页`);
+
+  for (const tabInfo of closedTabs) {
+    try {
+      // 标准化要恢复的URL
+      const normalizedUrl = (() => {
+        try {
+          const url = new URL(tabInfo.url);
+          return `${url.origin}${url.pathname}`;
+        } catch {
+          return tabInfo.url;
+        }
+      })();
+
+      // 检查是否已经存在相同的标签页
+      if (existingUrls.has(normalizedUrl)) {
+        console.log(`⚠️ 跳过恢复，标签页已存在: ${tabInfo.url}`);
+        continue;
+      }
+
+      console.log(`🔄 恢复标签页: ${tabInfo.url}`);
+
+      const newTab = await chrome.tabs.create({
+        url: tabInfo.url,
+        windowId: tabInfo.windowId,
+        active: false,
+      });
+
+      if (newTab.id) {
+        // 重新建立映射关系 - 使用更合理的操作ID策略
+        if (tabInfo.screenName) {
+          // 检查是否已有该用户的映射，如果有就先清除
+          const existingOperationIds = Array.from(tabsMap.keys()).filter(
+            key => key.includes(tabInfo.screenName!) || key.endsWith(`-${tabInfo.screenName}`),
+          );
+
+          for (const existingOpId of existingOperationIds) {
+            console.log(`🧹 清除用户 ${tabInfo.screenName} 的旧映射: ${existingOpId}`);
+            tabsMap.delete(existingOpId);
+          }
+
+          // 为这个用户创建新的操作ID
+          const userOperationId = `${operationId.split('-')[0]}-${tabInfo.screenName}`;
+          tabsMap.set(userOperationId, newTab.id);
+          console.log(`🔗 建立新映射: ${userOperationId} -> ${newTab.id}`);
+        }
+
+        // 将新URL加入已存在集合，避免重复恢复
+        existingUrls.add(normalizedUrl);
+
+        // 延迟刷新标签页以确保获取最新数据
+        setTimeout(
+          async () => {
+            try {
+              await chrome.tabs.reload(newTab.id!, { bypassCache: true });
+              console.log(`🔄 已刷新恢复的标签页: ${tabInfo.url}`);
+            } catch (reloadError) {
+              console.warn(`⚠️ 刷新恢复的标签页失败: ${tabInfo.url}`, reloadError);
+            }
+          },
+          2000 + recoveredCount * 500,
+        ); // 错开刷新时间，避免并发问题
+
+        recoveredCount++;
+        console.log(`✅ 成功恢复标签页: ${tabInfo.url} (新ID: ${newTab.id})`);
+      }
+    } catch (error) {
+      const errorMsg = `❌ 恢复标签页 ${tabInfo.url} 失败: ${error instanceof Error ? error.message : '未知错误'}`;
+      console.error(errorMsg);
+      errors.push(errorMsg);
+    }
+  }
+
+  // 清除已恢复的标签页信息
+  closedTabsForRecovery.delete(operationId);
+  console.log(
+    `🎉 标签页恢复完成，成功恢复 ${recoveredCount} 个，失败 ${errors.length} 个，跳过重复 ${closedTabs.length - recoveredCount - errors.length} 个`,
+  );
+
+  return { recoveredCount, errors };
 };
 
 // 监听插件图标点击事件，打开侧边栏
@@ -151,6 +356,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'stopOperation') {
     globalPauseState = false;
     console.log(`操作已停止，操作ID: ${currentOperationId} -> null`);
+
+    // 清理当前操作的相关数据
+    if (currentOperationId) {
+      cleanupOperationData(currentOperationId);
+    }
+
     currentOperationId = null;
     sendResponse({ success: true, message: '操作已停止' });
     return true;
@@ -186,6 +397,87 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         console.error('清除站点数据失败:', error);
         sendResponse({ success: false, error: error.message, timestamp: new Date().toLocaleString() });
       });
+    return true;
+  }
+
+  if (request.action === 'recoverTabs') {
+    console.log('收到恢复标签页请求');
+    const operationId = request.operationId;
+
+    if (!operationId) {
+      sendResponse({ success: false, error: '缺少操作ID' });
+      return true;
+    }
+
+    recoverClosedTabs(operationId)
+      .then(result => {
+        console.log('标签页恢复成功:', result);
+        sendResponse({
+          success: true,
+          message: `成功恢复 ${result.recoveredCount} 个标签页`,
+          recoveredCount: result.recoveredCount,
+          errors: result.errors,
+          timestamp: new Date().toLocaleString(),
+        });
+      })
+      .catch(error => {
+        console.error('恢复标签页失败:', error);
+        sendResponse({
+          success: false,
+          error: error.message,
+          timestamp: new Date().toLocaleString(),
+        });
+      });
+    return true;
+  }
+
+  if (request.action === 'getErrorRecoveryStatus') {
+    console.log('收到获取错误恢复状态请求');
+    const operationId = request.operationId;
+
+    if (!operationId) {
+      sendResponse({ success: false, error: '缺少操作ID' });
+      return true;
+    }
+
+    const isInRecovery = errorRecoveryInProgress.get(operationId) || false;
+    const hasClosedTabs = closedTabsForRecovery.has(operationId);
+    const closedTabsCount = closedTabsForRecovery.get(operationId)?.length || 0;
+
+    sendResponse({
+      success: true,
+      isInRecovery: isInRecovery,
+      hasClosedTabs: hasClosedTabs,
+      closedTabsCount: closedTabsCount,
+      timestamp: new Date().toLocaleString(),
+    });
+    return true;
+  }
+
+  if (request.action === 'cleanupOperationData') {
+    console.log('收到清理操作数据请求');
+    const operationId = request.operationId;
+
+    if (!operationId) {
+      sendResponse({ success: false, error: '缺少操作ID' });
+      return true;
+    }
+
+    try {
+      cleanupOperationData(operationId);
+      sendResponse({
+        success: true,
+        message: `操作 ${operationId} 的数据已清理`,
+        timestamp: new Date().toLocaleString(),
+      });
+    } catch (error) {
+      console.error('清理操作数据失败:', error);
+      sendResponse({
+        success: false,
+        error: error instanceof Error ? error.message : '未知错误',
+        timestamp: new Date().toLocaleString(),
+      });
+    }
     return true;
   }
 });
@@ -851,27 +1143,42 @@ const getFollowingCountFromTwitter = async (
         ) {
           const backupResultData = results[0].result as { result: number; isSpecificError: boolean };
           if (backupResultData.isSpecificError) {
-            console.log(`🚨 备用方法检测到特定错误页面，立即清除站点数据...`);
-            try {
-              await clearTwitterSiteData();
-              console.log(`清除站点数据完成，用于用户: ${screenName}`);
+            console.log(`🚨 备用方法检测到特定错误页面，启动错误处理和恢复机制...`);
 
-              // 通知侧边栏清除站点数据的操作
+            if (tab && tab.id) {
               try {
-                chrome.runtime.sendMessage({
-                  action: 'siteDataCleared',
-                  screenName: screenName,
-                  timestamp: new Date().toLocaleString(),
-                  reason: '备用方法检测到错误页面',
-                });
-              } catch (msgError) {
-                console.warn('发送站点数据清除通知失败:', msgError);
-              }
-            } catch (clearError) {
-              console.error(`清除站点数据失败:`, clearError);
-            }
+                // 调用新的错误处理函数
+                const recoveredFollowingCount = await handleErrorPageAndRecover(tab.id, screenName, operationId);
 
-            return -1;
+                if (recoveredFollowingCount !== -1) {
+                  console.log(`🎉 备用方法错误页面恢复成功，获取到following数: ${recoveredFollowingCount}`);
+                  return recoveredFollowingCount;
+                } else {
+                  console.error(`❌ 备用方法错误页面恢复失败`);
+                  return -1;
+                }
+              } catch (handleError) {
+                console.error(`备用方法错误处理过程中出错:`, handleError);
+
+                // 发送错误处理失败通知
+                try {
+                  chrome.runtime.sendMessage({
+                    action: 'errorHandlingFailed',
+                    screenName: screenName,
+                    timestamp: new Date().toLocaleString(),
+                    error: handleError instanceof Error ? handleError.message : '未知错误',
+                    source: '备用方法',
+                  });
+                } catch (msgError) {
+                  console.warn('发送错误处理失败通知失败:', msgError);
+                }
+
+                return -1;
+              }
+            } else {
+              console.error('备用方法无法获取错误页面的标签页ID');
+              return -1;
+            }
           }
         }
 
@@ -962,29 +1269,43 @@ const getFollowingCountFromTwitter = async (
           console.log('备用方法检测结果:', backupResultData);
         }
 
-        // 如果检测到特定错误页面，直接清除数据并返回
+        // 如果检测到特定错误页面，启动新的错误处理和恢复机制
         if (isSpecificError) {
-          console.log(`🚨 检测到特定错误页面，立即清除站点数据...`);
-          try {
-            await clearTwitterSiteData();
-            console.log(`清除站点数据完成，用于用户: ${screenName}`);
+          console.log(`🚨 检测到特定错误页面，启动错误处理和恢复机制...`);
 
-            // 通知侧边栏清除站点数据的操作
+          if (tab && tab.id) {
             try {
-              chrome.runtime.sendMessage({
-                action: 'siteDataCleared',
-                screenName: screenName,
-                timestamp: new Date().toLocaleString(),
-                reason: '检测到错误页面',
-              });
-            } catch (msgError) {
-              console.warn('发送站点数据清除通知失败:', msgError);
-            }
-          } catch (clearError) {
-            console.error(`清除站点数据失败:`, clearError);
-          }
+              // 调用新的错误处理函数
+              const recoveredFollowingCount = await handleErrorPageAndRecover(tab.id, screenName, operationId);
 
-          return -1;
+              if (recoveredFollowingCount !== -1) {
+                console.log(`🎉 错误页面恢复成功，获取到following数: ${recoveredFollowingCount}`);
+                return recoveredFollowingCount;
+              } else {
+                console.error(`❌ 错误页面恢复失败`);
+                return -1;
+              }
+            } catch (handleError) {
+              console.error(`错误处理过程中出错:`, handleError);
+
+              // 发送错误处理失败通知
+              try {
+                chrome.runtime.sendMessage({
+                  action: 'errorHandlingFailed',
+                  screenName: screenName,
+                  timestamp: new Date().toLocaleString(),
+                  error: handleError instanceof Error ? handleError.message : '未知错误',
+                });
+              } catch (msgError) {
+                console.warn('发送错误处理失败通知失败:', msgError);
+              }
+
+              return -1;
+            }
+          } else {
+            console.error('无法获取错误页面的标签页ID');
+            return -1;
+          }
         }
       } else {
         // 旧的返回格式，直接是数字
@@ -2018,6 +2339,447 @@ const clearTwitterSiteData = async (): Promise<void> => {
     throw error;
   }
 };
+
+// 新增：错误页面处理和恢复机制
+const handleErrorPageAndRecover = async (
+  errorTabId: number,
+  screenName: string,
+  operationId: string,
+): Promise<number> => {
+  console.log(`🚨 开始处理错误页面，标签页ID: ${errorTabId}, 用户: ${screenName}, 操作ID: ${operationId}`);
+
+  // 设置错误恢复进程状态
+  errorRecoveryInProgress.set(operationId, true);
+
+  try {
+    // 1. 保存并关闭其他标签页
+    console.log('步骤1: 保存并关闭其他标签页...');
+    const closedTabs = await saveAndCloseOtherTabs(errorTabId, operationId);
+    console.log(`已关闭 ${closedTabs.length} 个其他标签页`);
+
+    // 2. 循环清除缓存并检测，直到页面正常
+    console.log('步骤2: 开始循环清除缓存并检测...');
+    let maxAttempts = 5; // 最大尝试次数
+    let attempt = 0;
+    let followingCount = -1;
+
+    while (attempt < maxAttempts && followingCount === -1) {
+      attempt++;
+      console.log(`🔄 第 ${attempt}/${maxAttempts} 次尝试清除缓存并检测...`);
+
+      try {
+        // 清除缓存
+        console.log(`尝试 ${attempt}: 开始清除站点数据...`);
+        await clearTwitterSiteData();
+        console.log(`尝试 ${attempt}: 站点数据清除完成`);
+
+        // 等待清除操作完成
+        await new Promise(resolve => setTimeout(resolve, 3000));
+
+        // 刷新当前错误页面
+        console.log(`尝试 ${attempt}: 刷新错误页面...`);
+        await chrome.tabs.reload(errorTabId, { bypassCache: true });
+
+        // 等待页面加载完成
+        console.log(`尝试 ${attempt}: 等待页面加载完成...`);
+        await waitForTabComplete(errorTabId, operationId);
+
+        // 尝试提取following数据
+        console.log(`尝试 ${attempt}: 尝试提取following数据...`);
+        try {
+          const results = await chrome.scripting.executeScript({
+            target: { tabId: errorTabId },
+            func: () => {
+              // 复用现有的错误检测和数据提取逻辑
+              const logs: string[] = [];
+              logs.push('重新检测页面状态...');
+
+              // 检查是否还是错误页面
+              const checkForSpecificError = (): boolean => {
+                const errorTexts = [
+                  '出错了。请尝试重新加载。',
+                  '出错了。请尝试重新加载',
+                  'Something went wrong. Try reloading.',
+                  'Something went wrong. Try reloading',
+                ];
+
+                for (const errorText of errorTexts) {
+                  const errorElements = Array.from(document.querySelectorAll('*')).filter(el => {
+                    const text = el.textContent?.trim();
+                    return text && text.includes(errorText);
+                  });
+
+                  if (errorElements.length > 0) {
+                    logs.push(`🚨 仍然检测到错误页面，找到错误文本: "${errorText}"`);
+                    const retryButtons = document.querySelectorAll('button[role="button"]');
+                    let hasRetryButton = false;
+
+                    for (const button of Array.from(retryButtons)) {
+                      const buttonText = button.textContent?.trim();
+                      if (
+                        buttonText &&
+                        (buttonText.includes('重试') || buttonText.includes('retry') || buttonText.includes('Retry'))
+                      ) {
+                        hasRetryButton = true;
+                        break;
+                      }
+                    }
+
+                    if (hasRetryButton) {
+                      logs.push(`🔥 确认仍是错误页面`);
+                      return true;
+                    }
+                  }
+                }
+
+                const specificErrorElements = document.querySelectorAll(
+                  'span.css-1jxf684.r-bcqeeo.r-1ttztb7.r-qvutc0.r-poiln3',
+                );
+                for (const el of Array.from(specificErrorElements)) {
+                  const text = el.textContent?.trim();
+                  if (text && text.includes('出错了')) {
+                    logs.push(`🚨 通过CSS选择器仍检测到错误页面: "${text}"`);
+                    return true;
+                  }
+                }
+
+                return false;
+              };
+
+              const isStillError = checkForSpecificError();
+              if (isStillError) {
+                logs.push('❌ 页面仍然是错误状态，需要继续清除缓存');
+                return {
+                  result: -1,
+                  isStillError: true,
+                  logs: logs,
+                  timestamp: Date.now(),
+                };
+              }
+
+              // 页面不再是错误状态，尝试提取following数
+              logs.push('✅ 页面不再是错误状态，开始提取following数...');
+
+              // 使用简化的following数提取逻辑
+              const selectors = [
+                '[data-testid="UserFollowing-Count"]',
+                'a[href$="/following"] span',
+                'a[href*="/following"] span',
+              ];
+
+              let result = -1;
+              for (const selector of selectors) {
+                const elements = Array.from(document.querySelectorAll(selector));
+                for (const el of elements) {
+                  const text = el.textContent?.trim();
+                  if (text) {
+                    const match = text.match(/^(\d{1,3}(?:,\d{3})*|\d+(?:\.\d+)?[KMB]?)$/);
+                    if (match) {
+                      const numStr = match[1].replace(/,/g, '');
+                      let num = parseInt(numStr, 10);
+
+                      if (!isNaN(num) && num >= 0) {
+                        // 处理K, M, B后缀
+                        if (match[1].includes('K')) num *= 1000;
+                        else if (match[1].includes('M')) num *= 1000000;
+                        else if (match[1].includes('B')) num *= 1000000000;
+
+                        logs.push(`✅ 成功提取following数: ${num}`);
+                        result = num;
+                        break;
+                      }
+                    }
+                  }
+                }
+                if (result !== -1) break;
+              }
+
+              if (result === -1) {
+                logs.push('⚠️ 页面正常但未能提取到following数');
+              }
+
+              return {
+                result: result,
+                isStillError: false,
+                logs: logs,
+                timestamp: Date.now(),
+              };
+            },
+          });
+
+          if (results && results[0] && results[0].result) {
+            const resultData = results[0].result as {
+              result: number;
+              isStillError: boolean;
+              logs: string[];
+              timestamp: number;
+            };
+
+            console.log(`尝试 ${attempt} 检测结果:`, resultData.logs);
+
+            if (!resultData.isStillError) {
+              if (resultData.result !== -1) {
+                followingCount = resultData.result;
+                console.log(`🎉 尝试 ${attempt} 成功！页面恢复正常，following数: ${followingCount}`);
+                break;
+              } else {
+                console.log(`⚠️ 尝试 ${attempt}: 页面正常但未提取到following数，继续下一次尝试`);
+              }
+            } else {
+              console.log(`❌ 尝试 ${attempt}: 页面仍然是错误状态，继续下一次尝试`);
+            }
+          }
+        } catch (scriptError) {
+          console.error(`尝试 ${attempt}: 执行检测脚本失败:`, scriptError);
+        }
+
+        // 如果还没成功，等待一段时间再进行下一次尝试
+        if (followingCount === -1 && attempt < maxAttempts) {
+          console.log(`尝试 ${attempt}: 等待5秒后进行下一次尝试...`);
+          await new Promise(resolve => setTimeout(resolve, 5000));
+        }
+      } catch (error) {
+        console.error(`尝试 ${attempt} 过程中出错:`, error);
+        // 继续下一次尝试
+      }
+    }
+
+    if (followingCount === -1) {
+      console.error(`❌ 经过 ${maxAttempts} 次尝试，仍无法恢复页面`);
+
+      // 🚨 恢复失败时，强制清理所有相关数据和标签页
+      console.log('🧹 错误恢复失败，开始强制清理所有相关数据...');
+
+      try {
+        // 1. 强制关闭所有Twitter相关标签页（包括错误页面）
+        console.log('🗑️ 强制关闭所有Twitter相关标签页...');
+        const allTwitterTabs = await chrome.tabs.query({
+          url: ['*://twitter.com/*', '*://x.com/*', '*://www.twitter.com/*', '*://www.x.com/*'],
+        });
+
+        let closedErrorTabs = 0;
+        for (const tab of allTwitterTabs) {
+          if (tab.id) {
+            try {
+              await chrome.tabs.remove(tab.id);
+              closedErrorTabs++;
+              console.log(`🗑️ 已强制关闭标签页: ${tab.url} (ID: ${tab.id})`);
+            } catch (error) {
+              console.warn(`⚠️ 强制关闭标签页失败: ${tab.id}`, error);
+            }
+          }
+        }
+        console.log(`✅ 强制关闭完成，共关闭 ${closedErrorTabs} 个Twitter标签页`);
+
+        // 2. 清理所有映射关系
+        console.log('🧹 清理所有映射关系...');
+        const allMappings = Array.from(tabsMap.entries());
+        for (const [key, tabId] of allMappings) {
+          tabsMap.delete(key);
+          console.log(`🔄 已清理映射: ${key} -> ${tabId}`);
+        }
+
+        // 3. 清理当前操作的缓存数据
+        console.log('🧹 清理当前操作的缓存数据...');
+        cleanupOperationData(operationId);
+
+        // 4. 清理所有可能相关的操作数据
+        console.log('🧹 清理所有相关操作数据...');
+        const baseOpId = operationId.split('-')[0]; // 获取基础操作ID
+        const relatedOperationIds = Array.from(closedTabsForRecovery.keys()).filter(
+          id => id.startsWith(baseOpId) || id.includes(baseOpId),
+        );
+
+        for (const relatedOpId of relatedOperationIds) {
+          cleanupOperationData(relatedOpId);
+          console.log(`🧹 已清理相关操作数据: ${relatedOpId}`);
+        }
+      } catch (cleanupError) {
+        console.error('❌ 强制清理过程中出错:', cleanupError);
+      }
+
+      // 通知侧边栏恢复失败
+      try {
+        chrome.runtime.sendMessage({
+          action: 'errorRecoveryFailed',
+          screenName: screenName,
+          operationId: operationId,
+          attempts: maxAttempts,
+          timestamp: new Date().toLocaleString(),
+          forceCleanedUp: true, // 标记已进行强制清理
+        });
+      } catch (msgError) {
+        console.warn('发送恢复失败通知失败:', msgError);
+      }
+
+      // 🚨 恢复失败时不再恢复标签页，直接返回
+      console.log('❌ 错误恢复失败，跳过标签页恢复步骤');
+      return followingCount;
+    } else {
+      console.log(`🎉 成功恢复页面，following数: ${followingCount}`);
+
+      // 通知侧边栏恢复成功
+      try {
+        chrome.runtime.sendMessage({
+          action: 'errorRecoverySuccess',
+          screenName: screenName,
+          operationId: operationId,
+          followingCount: followingCount,
+          attempts: attempt,
+          timestamp: new Date().toLocaleString(),
+        });
+      } catch (msgError) {
+        console.warn('发送恢复成功通知失败:', msgError);
+      }
+
+      // 3. 只有成功时才恢复被关闭的标签页
+      console.log('步骤3: 恢复被关闭的标签页...');
+      const recoveryResult = await recoverClosedTabs(operationId);
+      console.log(`恢复结果: 成功 ${recoveryResult.recoveredCount} 个, 失败 ${recoveryResult.errors.length} 个`);
+    }
+
+    return followingCount;
+  } catch (error) {
+    console.error('错误页面处理过程中出错:', error);
+
+    // 🚨 处理过程中出错，也需要强制清理
+    console.log('🧹 处理过程出错，开始强制清理所有相关数据...');
+
+    try {
+      // 强制关闭所有Twitter相关标签页
+      const allTwitterTabs = await chrome.tabs.query({
+        url: ['*://twitter.com/*', '*://x.com/*', '*://www.twitter.com/*', '*://www.x.com/*'],
+      });
+
+      for (const tab of allTwitterTabs) {
+        if (tab.id) {
+          try {
+            await chrome.tabs.remove(tab.id);
+            console.log(`🗑️ 已强制关闭标签页: ${tab.url} (ID: ${tab.id})`);
+          } catch (removeError) {
+            console.warn(`⚠️ 强制关闭标签页失败: ${tab.id}`, removeError);
+          }
+        }
+      }
+
+      // 清理所有映射关系
+      const allMappings = Array.from(tabsMap.entries());
+      for (const [key, tabId] of allMappings) {
+        tabsMap.delete(key);
+      }
+
+      // 清理操作数据
+      cleanupOperationData(operationId);
+    } catch (cleanupError) {
+      console.error('❌ 出错后强制清理失败:', cleanupError);
+    }
+
+    return -1;
+  } finally {
+    // 清除错误恢复进程状态
+    errorRecoveryInProgress.delete(operationId);
+  }
+};
+
+// 新增：清理操作相关的所有数据
+const cleanupOperationData = (operationId: string): void => {
+  console.log(`🧹 开始清理操作 ${operationId} 的相关数据`);
+
+  // 清理缓存的标签页信息
+  if (closedTabsForRecovery.has(operationId)) {
+    const closedTabsCount = closedTabsForRecovery.get(operationId)?.length || 0;
+    closedTabsForRecovery.delete(operationId);
+    console.log(`🗑️ 已清理 ${closedTabsCount} 个缓存的标签页信息`);
+  }
+
+  // 清理错误恢复状态
+  if (errorRecoveryInProgress.has(operationId)) {
+    errorRecoveryInProgress.delete(operationId);
+    console.log(`🔄 已清理错误恢复状态`);
+  }
+
+  // 清理重试计数
+  if (retryAttempts.has(operationId)) {
+    retryAttempts.delete(operationId);
+    console.log(`🔢 已清理重试计数`);
+  }
+
+  // 清理相关的标签页映射
+  const relatedMappings = Array.from(tabsMap.entries()).filter(
+    ([key]) => key.startsWith(operationId) || key.includes(operationId),
+  );
+
+  for (const [key, tabId] of relatedMappings) {
+    tabsMap.delete(key);
+    console.log(`🔗 已清理映射: ${key} -> ${tabId}`);
+  }
+
+  console.log(`✅ 操作 ${operationId} 的数据清理完成`);
+};
+
+// 新增：清理所有过期的操作数据
+const cleanupAllExpiredData = (): void => {
+  console.log(`🧹 开始清理所有过期数据`);
+
+  const currentTime = Date.now();
+  const expireTime = 24 * 60 * 60 * 1000; // 24小时过期
+
+  // 清理过期的缓存标签页信息
+  for (const [operationId, closedTabs] of closedTabsForRecovery.entries()) {
+    try {
+      const operationTime = parseInt(operationId.split('_')[1]) || 0;
+      if (currentTime - operationTime > expireTime) {
+        closedTabsForRecovery.delete(operationId);
+        console.log(`🗑️ 已清理过期的标签页缓存: ${operationId} (${closedTabs.length} 个)`);
+      }
+    } catch (error) {
+      // 如果无法解析时间戳，也清理掉
+      closedTabsForRecovery.delete(operationId);
+      console.log(`🗑️ 已清理无效的标签页缓存: ${operationId}`);
+    }
+  }
+
+  // 清理过期的错误恢复状态
+  for (const operationId of errorRecoveryInProgress.keys()) {
+    try {
+      const operationTime = parseInt(operationId.split('_')[1]) || 0;
+      if (currentTime - operationTime > expireTime) {
+        errorRecoveryInProgress.delete(operationId);
+        console.log(`🔄 已清理过期的错误恢复状态: ${operationId}`);
+      }
+    } catch (error) {
+      errorRecoveryInProgress.delete(operationId);
+      console.log(`🔄 已清理无效的错误恢复状态: ${operationId}`);
+    }
+  }
+
+  // 清理过期的重试计数
+  for (const operationId of retryAttempts.keys()) {
+    try {
+      const operationTime = parseInt(operationId.split('_')[1]) || 0;
+      if (currentTime - operationTime > expireTime) {
+        retryAttempts.delete(operationId);
+        console.log(`🔢 已清理过期的重试计数: ${operationId}`);
+      }
+    } catch (error) {
+      retryAttempts.delete(operationId);
+      console.log(`🔢 已清理无效的重试计数: ${operationId}`);
+    }
+  }
+
+  console.log(`✅ 过期数据清理完成`);
+};
+
+// 定期清理过期数据
+setInterval(
+  () => {
+    cleanupAllExpiredData();
+  },
+  60 * 60 * 1000,
+); // 每小时清理一次
+
+// 插件启动时清理一次过期数据
+cleanupAllExpiredData();
 
 console.log('Background loaded');
 console.log("Edit 'chrome-extension/src/background/index.ts' and save to reload.");

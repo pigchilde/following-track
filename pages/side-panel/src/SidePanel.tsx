@@ -100,6 +100,9 @@ const SidePanel = () => {
     reason: string;
   } | null>(null);
 
+  // 添加当前操作ID状态
+  const [currentOperationId, setCurrentOperationId] = useState<string | null>(null);
+
   const operationIdRef = useRef<string | null>(null);
   const shouldStopRef = useRef(false);
   const countdownTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -192,6 +195,50 @@ const SidePanel = () => {
         setTimeout(() => {
           setClearSiteDataStatus(prev => (prev ? { ...prev, show: false } : null));
         }, 5000);
+      } else if (message.action === 'errorRecoverySuccess') {
+        console.log('收到错误恢复成功通知:', message);
+        setClearSiteDataStatus({
+          show: true,
+          timestamp: message.timestamp,
+          screenName: message.screenName,
+          reason: `错误页面恢复成功 (尝试${message.attempts}次，following数: ${message.followingCount})`,
+        });
+
+        // 8秒后自动隐藏（成功消息显示更久）
+        setTimeout(() => {
+          setClearSiteDataStatus(prev => (prev ? { ...prev, show: false } : null));
+        }, 8000);
+      } else if (message.action === 'errorRecoveryFailed') {
+        console.log('收到错误恢复失败通知:', message);
+
+        const reasonText = message.forceCleanedUp
+          ? `错误页面恢复失败 (尝试${message.attempts}次，已强制清理所有标签页)`
+          : `错误页面恢复失败 (尝试${message.attempts}次)`;
+
+        setClearSiteDataStatus({
+          show: true,
+          timestamp: message.timestamp,
+          screenName: message.screenName,
+          reason: reasonText,
+        });
+
+        // 10秒后自动隐藏（失败消息显示更久）
+        setTimeout(() => {
+          setClearSiteDataStatus(prev => (prev ? { ...prev, show: false } : null));
+        }, 10000);
+      } else if (message.action === 'errorHandlingFailed') {
+        console.log('收到错误处理失败通知:', message);
+        setClearSiteDataStatus({
+          show: true,
+          timestamp: message.timestamp,
+          screenName: message.screenName,
+          reason: `错误处理失败${message.source ? ` (${message.source})` : ''}: ${message.error}`,
+        });
+
+        // 10秒后自动隐藏
+        setTimeout(() => {
+          setClearSiteDataStatus(prev => (prev ? { ...prev, show: false } : null));
+        }, 10000);
       }
     };
 
@@ -273,6 +320,7 @@ const SidePanel = () => {
   const generateOperationId = () => {
     const id = `operation_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     console.log(`生成新操作ID: ${id}`);
+    setCurrentOperationId(id);
     return id;
   };
 
@@ -1530,6 +1578,19 @@ const SidePanel = () => {
       if (!isContinuousMode || shouldStopRef.current) {
         console.log(`操作结束，操作ID: ${operationIdRef.current}`);
 
+        // 清理操作相关数据
+        if (operationIdRef.current && !isContinuousMode) {
+          try {
+            await chrome.runtime.sendMessage({
+              action: 'cleanupOperationData',
+              operationId: operationIdRef.current,
+            });
+            console.log('✅ 操作结束后清理数据完成');
+          } catch (cleanupError) {
+            console.warn('⚠️ 清理操作数据失败:', cleanupError);
+          }
+        }
+
         // 在非连续模式结束或停止时关闭所有标签页
         if (!shouldStopRef.current) {
           // 如果不是因为停止而结束（停止时已经在 stopOperation 中关闭了）
@@ -1635,6 +1696,60 @@ const SidePanel = () => {
       }
     } catch (error) {
       console.error('清除站点数据请求失败:', error);
+    }
+  };
+
+  // 手动恢复标签页
+  const recoverTabs = async (operationId?: string) => {
+    try {
+      const response = await chrome.runtime.sendMessage({
+        action: 'recoverTabs',
+        operationId: operationId || currentOperationId,
+      });
+
+      if (response.success) {
+        setClearSiteDataStatus({
+          show: true,
+          timestamp: response.timestamp,
+          screenName: '手动操作',
+          reason: `手动恢复标签页成功 (恢复了 ${response.recoveredCount} 个)`,
+        });
+
+        // 5秒后自动隐藏
+        setTimeout(() => {
+          setClearSiteDataStatus(prev => (prev ? { ...prev, show: false } : null));
+        }, 5000);
+      } else {
+        console.error('恢复标签页失败:', response.error);
+        setClearSiteDataStatus({
+          show: true,
+          timestamp: response.timestamp,
+          screenName: '手动操作',
+          reason: `手动恢复标签页失败: ${response.error}`,
+        });
+
+        // 8秒后自动隐藏
+        setTimeout(() => {
+          setClearSiteDataStatus(prev => (prev ? { ...prev, show: false } : null));
+        }, 8000);
+      }
+    } catch (error) {
+      console.error('恢复标签页请求失败:', error);
+    }
+  };
+
+  // 获取错误恢复状态
+  const getErrorRecoveryStatus = async (operationId?: string) => {
+    try {
+      const response = await chrome.runtime.sendMessage({
+        action: 'getErrorRecoveryStatus',
+        operationId: operationId || currentOperationId,
+      });
+
+      return response.success ? response : null;
+    } catch (error) {
+      console.error('获取错误恢复状态失败:', error);
+      return null;
     }
   };
 
@@ -2062,18 +2177,41 @@ const SidePanel = () => {
               <div
                 className={cn(
                   'rounded-lg border p-3 text-sm transition-all duration-300',
-                  isLight
-                    ? 'border-purple-200 bg-purple-50 text-purple-800'
-                    : 'border-purple-700 bg-purple-900/30 text-purple-200',
+                  // 根据消息类型选择不同的颜色主题
+                  clearSiteDataStatus.reason.includes('恢复成功')
+                    ? isLight
+                      ? 'border-green-200 bg-green-50 text-green-800'
+                      : 'border-green-700 bg-green-900/30 text-green-200'
+                    : clearSiteDataStatus.reason.includes('失败')
+                      ? isLight
+                        ? 'border-red-200 bg-red-50 text-red-800'
+                        : 'border-red-700 bg-red-900/30 text-red-200'
+                      : isLight
+                        ? 'border-purple-200 bg-purple-50 text-purple-800'
+                        : 'border-purple-700 bg-purple-900/30 text-purple-200',
                 )}>
                 <div className="flex items-center gap-2">
-                  <span className="text-lg">🧹</span>
+                  <span className="text-lg">
+                    {clearSiteDataStatus.reason.includes('恢复成功')
+                      ? '🎉'
+                      : clearSiteDataStatus.reason.includes('失败')
+                        ? '❌'
+                        : '🧹'}
+                  </span>
                   <div>
-                    <div className="font-semibold">站点数据已清除</div>
+                    <div className="font-semibold">
+                      {clearSiteDataStatus.reason.includes('恢复成功')
+                        ? '错误页面恢复成功'
+                        : clearSiteDataStatus.reason.includes('恢复失败')
+                          ? '错误页面恢复失败'
+                          : clearSiteDataStatus.reason.includes('错误处理失败')
+                            ? '错误处理失败'
+                            : '站点数据已清除'}
+                    </div>
                     <div className="text-xs opacity-80">
                       用户: {clearSiteDataStatus.screenName} | 时间: {clearSiteDataStatus.timestamp}
                     </div>
-                    <div className="text-xs opacity-80">原因: {clearSiteDataStatus.reason}</div>
+                    <div className="text-xs opacity-80">详情: {clearSiteDataStatus.reason}</div>
                   </div>
                 </div>
               </div>
