@@ -87,6 +87,9 @@ const SidePanel = () => {
   const [proxyConfig, setProxyConfig] = useState<string>('[{"name": "日本-联通中转"},{"name": "美国-联通中转"}]');
   const [currentProxy, setCurrentProxy] = useState<string>('');
 
+  // 新增：配置折叠状态
+  const [isConfigCollapsed, setIsConfigCollapsed] = useState<boolean>(true);
+
   // 新增：代理切换通知状态
   const [proxyChangeStatus, setProxyChangeStatus] = useState<{
     show: boolean;
@@ -199,6 +202,12 @@ const SidePanel = () => {
     const savedCurrentProxy = localStorage.getItem('currentProxy');
     if (savedCurrentProxy) {
       setCurrentProxy(savedCurrentProxy);
+    }
+
+    // 新增：加载配置折叠状态
+    const savedConfigCollapsed = localStorage.getItem('configCollapsed');
+    if (savedConfigCollapsed) {
+      setIsConfigCollapsed(JSON.parse(savedConfigCollapsed));
     }
 
     return () => {
@@ -352,6 +361,11 @@ const SidePanel = () => {
       localStorage.setItem('currentProxy', currentProxy);
     }
   }, [currentProxy]);
+
+  // 新增：保存配置折叠状态
+  useEffect(() => {
+    localStorage.setItem('configCollapsed', JSON.stringify(isConfigCollapsed));
+  }, [isConfigCollapsed]);
 
   const startCountdown = (seconds: number) => {
     setNextRoundCountdown(seconds);
@@ -1462,259 +1476,277 @@ const SidePanel = () => {
   };
 
   const updateFollowingCounts = async (isNewRound: boolean = false) => {
-    if (isLoading && !isNewRound) {
-      console.log('已经有操作在进行中，请等待完成或停止当前操作');
-      return;
-    }
-
-    const targetNumber = parseInt(targetCount.trim(), 10);
-    if (!targetCount.trim() || isNaN(targetNumber) || targetNumber <= 0) {
-      setProgress('❌ 请输入有效的处理条数（大于0的整数）');
-      return;
-    }
-
-    if (isNewRound) {
-      stopCountdown();
-    }
-
-    shouldStopRef.current = false;
-    setIsLoading(true);
-    setIsPaused(false);
-    setIsRetrying(false);
-    if (!isNewRound) {
-      setCurrentRound(1);
-    }
-
-    const roundText = isContinuousMode ? `第 ${currentRound} 轮 - ` : '';
-    setProgress(`${roundText}正在获取用户列表...`);
-    setCurrentUser(null);
-    updateStats(false, { total: 0, processed: 0, successful: 0, failed: 0, changed: 0, skipped: 0 });
-    statsRef.current = { total: 0, processed: 0, successful: 0, failed: 0, changed: 0, skipped: 0 };
-
-    let newOperationId: string;
-    if (isContinuousMode && baseOperationIdRef.current && isNewRound) {
-      newOperationId = baseOperationIdRef.current;
-      console.log(`连续监听模式第 ${currentRound} 轮，复用基础操作ID: ${newOperationId}`);
-    } else {
-      newOperationId = generateOperationId();
-      if (isContinuousMode) {
-        baseOperationIdRef.current = newOperationId;
-        console.log(`连续监听模式首轮，生成并保存基础操作ID: ${newOperationId}`);
-      }
-    }
-    operationIdRef.current = newOperationId;
-    console.log(`开始新操作，操作ID: ${newOperationId}，目标处理条数: ${targetNumber}，轮次: ${currentRound}`);
+    console.log('🔥 updateFollowingCounts 函数开始执行，参数:', { isNewRound });
+    console.log('🔥 当前状态:', {
+      isLoading,
+      isRetrying,
+      targetCount,
+      apiServerHost,
+      randomDelayMin,
+      randomDelayMax,
+      changeThreshold,
+    });
 
     try {
-      console.log('正在获取第一页数据...');
-      const firstPageData = await fetchUsers(1, 10);
-      console.log('第一页数据获取成功:', firstPageData);
-      const apiTotal = firstPageData.data.pagination.total;
+      if (isLoading && !isNewRound) {
+        console.log('已经有操作在进行中，请等待完成或停止当前操作');
+        return;
+      }
 
-      const actualTotal = Math.min(targetNumber, apiTotal);
-      const totalPages = Math.ceil(actualTotal / 10);
+      const targetNumber = parseInt(targetCount.trim(), 10);
+      if (!targetCount.trim() || isNaN(targetNumber) || targetNumber <= 0) {
+        console.log('❌ 目标处理条数验证失败:', { targetCount: targetCount.trim(), targetNumber });
+        setProgress('❌ 请输入有效的处理条数（大于0的整数）');
+        return;
+      }
 
-      updateStats(false, { total: actualTotal });
-      statsRef.current = { ...statsRef.current, total: actualTotal };
+      console.log('✅ 验证通过，开始处理:', { targetNumber });
 
-      setProgress(
-        `${roundText}目标处理 ${targetNumber} 个用户，API总共有 ${apiTotal} 个用户，实际处理 ${actualTotal} 个用户，分 ${totalPages} 组处理...`,
-      );
-      console.log(
-        `目标处理 ${targetNumber} 个用户，API总共有 ${apiTotal} 个用户，实际处理 ${actualTotal} 个用户，分 ${totalPages} 组处理`,
-      );
+      if (isNewRound) {
+        stopCountdown();
+      }
 
-      const allNewUsers: string[] = [];
+      shouldStopRef.current = false;
+      setIsLoading(true);
+      setIsPaused(false);
+      setIsRetrying(false);
+      if (!isNewRound) {
+        setCurrentRound(1);
+      }
 
-      const groupPromises: Promise<string[]>[] = [];
-      const groupStats: { page: number; users: number }[] = [];
-      let processedCount = 0;
+      const roundText = isContinuousMode ? `第 ${currentRound} 轮 - ` : '';
+      setProgress(`${roundText}正在获取用户列表...`);
+      setCurrentUser(null);
+      updateStats(false, { total: 0, processed: 0, successful: 0, failed: 0, changed: 0, skipped: 0 });
+      statsRef.current = { total: 0, processed: 0, successful: 0, failed: 0, changed: 0, skipped: 0 };
 
-      for (let page = 1; page <= totalPages && !shouldStopRef.current && processedCount < actualTotal; page++) {
-        if (shouldStopRef.current) break;
-
-        const processGroup = async (pageNum: number): Promise<string[]> => {
-          setProgress(prev => `${prev}\n${roundText}正在处理第 ${pageNum}/${totalPages} 组...`);
-          console.log(`开始处理第 ${pageNum}/${totalPages} 组...`);
-
-          const pageData = pageNum === 1 ? firstPageData : await fetchUsers(pageNum, 10);
-          let users = pageData.data.list;
-
-          const remainingCount = actualTotal - processedCount;
-          if (users.length > remainingCount) {
-            users = users.slice(0, remainingCount);
-          }
-
-          console.log(
-            `第 ${pageNum} 组有 ${users.length} 个用户（原始 ${pageData.data.list.length} 个，限制后 ${users.length} 个）`,
-          );
-          groupStats.push({ page: pageNum, users: users.length });
-          processedCount += users.length;
-
-          if (users.length > 0) {
-            console.log(`开始处理第 ${pageNum} 组的 ${users.length} 个用户...`);
-            const groupOperationId = `${operationIdRef.current}-group-${pageNum}`;
-            console.log(`第 ${pageNum} 组使用操作ID: ${groupOperationId}，基础操作ID: ${baseOperationIdRef.current}`);
-            // 在连续监听模式的新轮次中，允许第一个用户复用标签页
-            const shouldReuseTabForFirstUser = isContinuousMode && isNewRound;
-            console.log(
-              `第 ${pageNum} 组标签页复用判断: isContinuousMode=${isContinuousMode}, isNewRound=${isNewRound}, shouldReuseTabForFirstUser=${shouldReuseTabForFirstUser}`,
-            );
-            const newUsersInGroup = await processUserGroup(users, groupOperationId, shouldReuseTabForFirstUser);
-            console.log(`第 ${pageNum} 组处理完成，发现 ${newUsersInGroup.length} 个用户关注数有变化`);
-            return newUsersInGroup;
-          }
-
-          return [];
-        };
-
-        groupPromises.push(processGroup(page));
-
-        if (page < totalPages && !shouldStopRef.current && processedCount < actualTotal) {
-          await new Promise(resolve => setTimeout(resolve, 2000));
+      let newOperationId: string;
+      if (isContinuousMode && baseOperationIdRef.current && isNewRound) {
+        newOperationId = baseOperationIdRef.current;
+        console.log(`连续监听模式第 ${currentRound} 轮，复用基础操作ID: ${newOperationId}`);
+      } else {
+        newOperationId = generateOperationId();
+        if (isContinuousMode) {
+          baseOperationIdRef.current = newOperationId;
+          console.log(`连续监听模式首轮，生成并保存基础操作ID: ${newOperationId}`);
         }
       }
+      operationIdRef.current = newOperationId;
+      console.log(`开始新操作，操作ID: ${newOperationId}，目标处理条数: ${targetNumber}，轮次: ${currentRound}`);
 
-      console.log(`等待 ${groupPromises.length} 个分组并行处理完成...`);
-      setProgress(prev => `${prev}\n${roundText}等待 ${groupPromises.length} 个分组并行处理完成...`);
+      try {
+        console.log('正在获取第一页数据...');
+        const firstPageData = await fetchUsers(1, 10);
+        console.log('第一页数据获取成功:', firstPageData);
+        const apiTotal = firstPageData.data.pagination.total;
 
-      const results = await Promise.all(groupPromises);
+        const actualTotal = Math.min(targetNumber, apiTotal);
+        const totalPages = Math.ceil(actualTotal / 10);
 
-      results.forEach(groupResult => {
-        allNewUsers.push(...groupResult);
-      });
+        updateStats(false, { total: actualTotal });
+        statsRef.current = { ...statsRef.current, total: actualTotal };
 
-      console.log(`所有分组处理完成，分组情况: ${JSON.stringify(groupStats)}`);
+        setProgress(
+          `${roundText}目标处理 ${targetNumber} 个用户，API总共有 ${apiTotal} 个用户，实际处理 ${actualTotal} 个用户，分 ${totalPages} 组处理...`,
+        );
+        console.log(
+          `目标处理 ${targetNumber} 个用户，API总共有 ${apiTotal} 个用户，实际处理 ${actualTotal} 个用户，分 ${totalPages} 组处理`,
+        );
 
-      if (allNewUsers.length > 0) {
-        console.log(`共发现 ${allNewUsers.length} 个用户关注数有变化，保存到本地存储`);
-        const existingUsers = JSON.parse(localStorage.getItem('newTwitterUsers') || '[]');
-        const updatedUsers = [...allNewUsers, ...existingUsers];
-        localStorage.setItem('newTwitterUsers', JSON.stringify(updatedUsers));
-        setNewUsers(updatedUsers);
-      }
+        const allNewUsers: string[] = [];
 
-      // 正常用户处理完成后，开始处理失败用户
-      if (!shouldStopRef.current) {
-        // 在处理失败用户前，先获取当前的失败用户数据，确保数据一致性
-        const currentFailedUsers = JSON.parse(localStorage.getItem('failedTwitterUsers') || '[]') as FailedUser[];
-        const finalFailedCount = currentFailedUsers.length;
+        const groupPromises: Promise<string[]>[] = [];
+        const groupStats: { page: number; users: number }[] = [];
+        let processedCount = 0;
 
-        const finalStats = statsRef.current;
-        const completionMessage = `✅ 第 ${currentRound} 轮正常用户处理完成！共处理 ${finalStats.processed} 个用户，成功 ${finalStats.successful}，失败 ${finalStats.failed}，无变化 ${finalStats.skipped}，发现 ${finalStats.changed} 个用户关注数有变化。${finalFailedCount > 0 ? `检测到 ${finalFailedCount} 个失败用户，即将开始重试...` : ''}`;
-        setProgress(completionMessage);
-        console.log(completionMessage);
-        console.log('正常用户处理完成，统计详情:', finalStats);
+        for (let page = 1; page <= totalPages && !shouldStopRef.current && processedCount < actualTotal; page++) {
+          if (shouldStopRef.current) break;
 
-        // 在本轮完成后立即处理失败用户
-        if (finalFailedCount > 0 && !shouldStopRef.current) {
-          console.log(
-            `📊 外部调用数据一致性检查: 正常统计显示失败 ${finalStats.failed} 个，localStorage中有 ${finalFailedCount} 个失败用户`,
-          );
-          console.log(`🔍 外部失败用户详情:`, currentFailedUsers.map(u => `${u.screenName}(ID:${u.id})`).join(', '));
-          console.log(`开始处理 ${finalFailedCount} 个失败用户...`);
-          setProgress(prev => `${prev}\n🔄 开始重试 ${finalFailedCount} 个失败用户...`);
+          const processGroup = async (pageNum: number): Promise<string[]> => {
+            setProgress(prev => `${prev}\n${roundText}正在处理第 ${pageNum}/${totalPages} 组...`);
+            console.log(`开始处理第 ${pageNum}/${totalPages} 组...`);
 
-          // 先关闭其他已成功的标签页
-          console.log('重试失败用户前，先关闭其他已成功的标签页...');
-          setProgress(prev => `${prev}\n🗂️ 关闭其他已成功的标签页中...`);
+            const pageData = pageNum === 1 ? firstPageData : await fetchUsers(pageNum, 10);
+            let users = pageData.data.list;
+
+            const remainingCount = actualTotal - processedCount;
+            if (users.length > remainingCount) {
+              users = users.slice(0, remainingCount);
+            }
+
+            console.log(
+              `第 ${pageNum} 组有 ${users.length} 个用户（原始 ${pageData.data.list.length} 个，限制后 ${users.length} 个）`,
+            );
+            groupStats.push({ page: pageNum, users: users.length });
+            processedCount += users.length;
+
+            if (users.length > 0) {
+              console.log(`开始处理第 ${pageNum} 组的 ${users.length} 个用户...`);
+              const groupOperationId = `${operationIdRef.current}-group-${pageNum}`;
+              console.log(`第 ${pageNum} 组使用操作ID: ${groupOperationId}，基础操作ID: ${baseOperationIdRef.current}`);
+              // 在连续监听模式的新轮次中，允许第一个用户复用标签页
+              const shouldReuseTabForFirstUser = isContinuousMode && isNewRound;
+              console.log(
+                `第 ${pageNum} 组标签页复用判断: isContinuousMode=${isContinuousMode}, isNewRound=${isNewRound}, shouldReuseTabForFirstUser=${shouldReuseTabForFirstUser}`,
+              );
+              const newUsersInGroup = await processUserGroup(users, groupOperationId, shouldReuseTabForFirstUser);
+              console.log(`第 ${pageNum} 组处理完成，发现 ${newUsersInGroup.length} 个用户关注数有变化`);
+              return newUsersInGroup;
+            }
+
+            return [];
+          };
+
+          groupPromises.push(processGroup(page));
+
+          if (page < totalPages && !shouldStopRef.current && processedCount < actualTotal) {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          }
+        }
+
+        console.log(`等待 ${groupPromises.length} 个分组并行处理完成...`);
+        setProgress(prev => `${prev}\n${roundText}等待 ${groupPromises.length} 个分组并行处理完成...`);
+
+        const results = await Promise.all(groupPromises);
+
+        results.forEach(groupResult => {
+          allNewUsers.push(...groupResult);
+        });
+
+        console.log(`所有分组处理完成，分组情况: ${JSON.stringify(groupStats)}`);
+
+        if (allNewUsers.length > 0) {
+          console.log(`共发现 ${allNewUsers.length} 个用户关注数有变化，保存到本地存储`);
+          const existingUsers = JSON.parse(localStorage.getItem('newTwitterUsers') || '[]');
+          const updatedUsers = [...allNewUsers, ...existingUsers];
+          localStorage.setItem('newTwitterUsers', JSON.stringify(updatedUsers));
+          setNewUsers(updatedUsers);
+        }
+
+        // 正常用户处理完成后，开始处理失败用户
+        if (!shouldStopRef.current) {
+          // 在处理失败用户前，先获取当前的失败用户数据，确保数据一致性
+          const currentFailedUsers = JSON.parse(localStorage.getItem('failedTwitterUsers') || '[]') as FailedUser[];
+          const finalFailedCount = currentFailedUsers.length;
+
+          const finalStats = statsRef.current;
+          const completionMessage = `✅ 第 ${currentRound} 轮正常用户处理完成！共处理 ${finalStats.processed} 个用户，成功 ${finalStats.successful}，失败 ${finalStats.failed}，无变化 ${finalStats.skipped}，发现 ${finalStats.changed} 个用户关注数有变化。${finalFailedCount > 0 ? `检测到 ${finalFailedCount} 个失败用户，即将开始重试...` : ''}`;
+          setProgress(completionMessage);
+          console.log(completionMessage);
+          console.log('正常用户处理完成，统计详情:', finalStats);
+
+          // 在本轮完成后立即处理失败用户
+          if (finalFailedCount > 0 && !shouldStopRef.current) {
+            console.log(
+              `📊 外部调用数据一致性检查: 正常统计显示失败 ${finalStats.failed} 个，localStorage中有 ${finalFailedCount} 个失败用户`,
+            );
+            console.log(`🔍 外部失败用户详情:`, currentFailedUsers.map(u => `${u.screenName}(ID:${u.id})`).join(', '));
+            console.log(`开始处理 ${finalFailedCount} 个失败用户...`);
+            setProgress(prev => `${prev}\n🔄 开始重试 ${finalFailedCount} 个失败用户...`);
+
+            // 先关闭其他已成功的标签页
+            console.log('重试失败用户前，先关闭其他已成功的标签页...');
+            setProgress(prev => `${prev}\n🗂️ 关闭其他已成功的标签页中...`);
+            try {
+              const closeResult = await closeAllTabs();
+              if (closeResult.success && closeResult.closedCount > 0) {
+                console.log(`✅ 成功关闭了 ${closeResult.closedCount} 个标签页`);
+                setProgress(prev => `${prev}\n✅ 成功关闭了 ${closeResult.closedCount} 个标签页`);
+              } else if (closeResult.closedCount === 0) {
+                console.log('📝 没有需要关闭的标签页');
+                setProgress(prev => `${prev}\n📝 没有需要关闭的标签页`);
+              } else {
+                console.warn('⚠️ 关闭标签页时出现部分错误:', closeResult.errors);
+                setProgress(prev => `${prev}\n⚠️ 关闭标签页时出现部分错误`);
+              }
+            } catch (closeError) {
+              console.error('❌ 关闭标签页失败:', closeError);
+              setProgress(prev => `${prev}\n⚠️ 关闭标签页失败，继续重试用户`);
+            }
+
+            // 等待2秒让标签页关闭完成
+            await new Promise(resolve => setTimeout(resolve, 2000));
+
+            // 处理失败用户
+            const retryResults = await processFailedUsersInGroups();
+
+            if (retryResults.length > 0) {
+              console.log(`失败用户重试完成，发现 ${retryResults.length} 个用户关注数有变化`);
+              const existingUsers = JSON.parse(localStorage.getItem('newTwitterUsers') || '[]');
+              const updatedUsers = [...retryResults, ...existingUsers];
+              localStorage.setItem('newTwitterUsers', JSON.stringify(updatedUsers));
+              setNewUsers(updatedUsers);
+              setProgress(prev => `${prev}\n✅ 失败用户重试完成，发现 ${retryResults.length} 个用户关注数有变化`);
+            } else {
+              setProgress(prev => `${prev}\n📝 失败用户重试完成，未发现关注数变化`);
+            }
+          }
+
+          // 获取最终的失败用户数量（重试后可能有变化）
+          const finalFailedCountAfterRetry = JSON.parse(localStorage.getItem('failedTwitterUsers') || '[]').length;
+          const finalCompletionMessage = `✅ 第 ${currentRound} 轮全部处理完成！${finalFailedCountAfterRetry > 0 ? `还有 ${finalFailedCountAfterRetry} 个用户处理失败，将在下一轮继续重试。` : '所有用户处理成功！'}`;
+          setProgress(prev => `${prev}\n${finalCompletionMessage}`);
+          console.log(finalCompletionMessage);
+
+          // 在每轮完成后自动关闭所有标签页
+          console.log(`第 ${currentRound} 轮完成，开始关闭所有标签页...`);
           try {
             const closeResult = await closeAllTabs();
             if (closeResult.success && closeResult.closedCount > 0) {
               console.log(`✅ 成功关闭了 ${closeResult.closedCount} 个标签页`);
-              setProgress(prev => `${prev}\n✅ 成功关闭了 ${closeResult.closedCount} 个标签页`);
+              setProgress(prev => `${prev}\n🗂️ 已自动关闭 ${closeResult.closedCount} 个标签页`);
             } else if (closeResult.closedCount === 0) {
               console.log('📝 没有需要关闭的标签页');
-              setProgress(prev => `${prev}\n📝 没有需要关闭的标签页`);
             } else {
               console.warn('⚠️ 关闭标签页时出现部分错误:', closeResult.errors);
-              setProgress(prev => `${prev}\n⚠️ 关闭标签页时出现部分错误`);
             }
           } catch (closeError) {
             console.error('❌ 关闭标签页失败:', closeError);
-            setProgress(prev => `${prev}\n⚠️ 关闭标签页失败，继续重试用户`);
           }
 
-          // 等待2秒让标签页关闭完成
-          await new Promise(resolve => setTimeout(resolve, 2000));
+          if (isContinuousMode && !shouldStopRef.current) {
+            const intervalSeconds = parseInt(roundInterval, 10);
+            if (isNaN(intervalSeconds) || intervalSeconds <= 0) {
+              setProgress(prev => `${prev}\n❌ 无效的轮次间隔时间，停止连续监听`);
+              setIsContinuousMode(false);
+            } else {
+              setProgress(
+                prev => `${prev}\n⏰ 连续监听模式已启用，${intervalSeconds} 秒后开始第 ${currentRound + 1} 轮`,
+              );
 
-          // 处理失败用户
-          const retryResults = await processFailedUsersInGroups();
+              startCountdown(intervalSeconds);
 
-          if (retryResults.length > 0) {
-            console.log(`失败用户重试完成，发现 ${retryResults.length} 个用户关注数有变化`);
-            const existingUsers = JSON.parse(localStorage.getItem('newTwitterUsers') || '[]');
-            const updatedUsers = [...retryResults, ...existingUsers];
-            localStorage.setItem('newTwitterUsers', JSON.stringify(updatedUsers));
-            setNewUsers(updatedUsers);
-            setProgress(prev => `${prev}\n✅ 失败用户重试完成，发现 ${retryResults.length} 个用户关注数有变化`);
-          } else {
-            setProgress(prev => `${prev}\n📝 失败用户重试完成，未发现关注数变化`);
+              setTimeout(async () => {
+                if (!shouldStopRef.current && isContinuousMode) {
+                  console.log(`⏰ 定时器触发，准备开始第 ${currentRound + 1} 轮`);
+                  setCurrentRound(prev => {
+                    const newRound = prev + 1;
+                    console.log(`🔄 轮次更新: ${prev} → ${newRound}`);
+                    return newRound;
+                  });
+                  await updateFollowingCounts(true);
+                }
+              }, intervalSeconds * 1000);
+            }
           }
         }
-
-        // 获取最终的失败用户数量（重试后可能有变化）
-        const finalFailedCountAfterRetry = JSON.parse(localStorage.getItem('failedTwitterUsers') || '[]').length;
-        const finalCompletionMessage = `✅ 第 ${currentRound} 轮全部处理完成！${finalFailedCountAfterRetry > 0 ? `还有 ${finalFailedCountAfterRetry} 个用户处理失败，将在下一轮继续重试。` : '所有用户处理成功！'}`;
-        setProgress(prev => `${prev}\n${finalCompletionMessage}`);
-        console.log(finalCompletionMessage);
-
-        // 在每轮完成后自动关闭所有标签页
-        console.log(`第 ${currentRound} 轮完成，开始关闭所有标签页...`);
-        try {
-          const closeResult = await closeAllTabs();
-          if (closeResult.success && closeResult.closedCount > 0) {
-            console.log(`✅ 成功关闭了 ${closeResult.closedCount} 个标签页`);
-            setProgress(prev => `${prev}\n🗂️ 已自动关闭 ${closeResult.closedCount} 个标签页`);
-          } else if (closeResult.closedCount === 0) {
-            console.log('📝 没有需要关闭的标签页');
-          } else {
-            console.warn('⚠️ 关闭标签页时出现部分错误:', closeResult.errors);
-          }
-        } catch (closeError) {
-          console.error('❌ 关闭标签页失败:', closeError);
-        }
+      } catch (error) {
+        console.error('❌ updateFollowingCounts 函数执行出错:', error);
+        const errorMessage = `❌ 第 ${currentRound} 轮错误: ${error instanceof Error ? error.message : '未知错误'}`;
+        setProgress(errorMessage);
+        console.error(errorMessage);
 
         if (isContinuousMode && !shouldStopRef.current) {
+          setProgress(prev => `${prev}\n⚠️ 将在 ${roundInterval} 秒后重试...`);
           const intervalSeconds = parseInt(roundInterval, 10);
-          if (isNaN(intervalSeconds) || intervalSeconds <= 0) {
-            setProgress(prev => `${prev}\n❌ 无效的轮次间隔时间，停止连续监听`);
-            setIsContinuousMode(false);
-          } else {
-            setProgress(prev => `${prev}\n⏰ 连续监听模式已启用，${intervalSeconds} 秒后开始第 ${currentRound + 1} 轮`);
-
-            startCountdown(intervalSeconds);
-
-            setTimeout(async () => {
-              if (!shouldStopRef.current && isContinuousMode) {
-                console.log(`⏰ 定时器触发，准备开始第 ${currentRound + 1} 轮`);
-                setCurrentRound(prev => {
-                  const newRound = prev + 1;
-                  console.log(`🔄 轮次更新: ${prev} → ${newRound}`);
-                  return newRound;
-                });
-                await updateFollowingCounts(true);
-              }
-            }, intervalSeconds * 1000);
-          }
+          startCountdown(intervalSeconds);
+          setTimeout(async () => {
+            if (!shouldStopRef.current && isContinuousMode) {
+              console.log(`⚠️ 错误重试定时器触发，重试第 ${currentRound} 轮`);
+              await updateFollowingCounts(true);
+            }
+          }, intervalSeconds * 1000);
         }
-      }
-    } catch (error) {
-      console.error('更新关注数时出错:', error);
-      const errorMessage = `❌ 第 ${currentRound} 轮错误: ${error instanceof Error ? error.message : '未知错误'}`;
-      setProgress(errorMessage);
-      console.error(errorMessage);
-
-      if (isContinuousMode && !shouldStopRef.current) {
-        setProgress(prev => `${prev}\n⚠️ 将在 ${roundInterval} 秒后重试...`);
-        const intervalSeconds = parseInt(roundInterval, 10);
-        startCountdown(intervalSeconds);
-        setTimeout(async () => {
-          if (!shouldStopRef.current && isContinuousMode) {
-            console.log(`⚠️ 错误重试定时器触发，重试第 ${currentRound} 轮`);
-            await updateFollowingCounts(true);
-          }
-        }, intervalSeconds * 1000);
       }
     } finally {
       if (!isContinuousMode || shouldStopRef.current) {
@@ -1901,93 +1933,41 @@ const SidePanel = () => {
         <div className="mx-auto max-w-sm p-4">
           <h1 className="mb-4 text-center text-xl font-bold">Twitter 关注数更新工具</h1>
 
-          {!isLoading && !isRetrying && (
-            <div className="mb-4">
-              <label
-                htmlFor="apiServerHost"
-                className={cn('mb-2 block text-sm font-medium', isLight ? 'text-gray-700' : 'text-gray-300')}>
-                API服务器地址:
-              </label>
-              <input
-                id="apiServerHost"
-                type="text"
-                value={apiServerHost}
-                onChange={e => setApiServerHost(e.target.value)}
-                placeholder="请输入API服务器地址，如: 127.0.0.1:7072"
-                className={cn(
-                  'w-full rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2',
-                  isLight
-                    ? 'border-gray-300 bg-white text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:ring-blue-500'
-                    : 'border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-400 focus:border-blue-400 focus:ring-blue-400',
-                )}
-              />
-              <p className={cn('mt-1 text-xs', isLight ? 'text-gray-500' : 'text-gray-400')}>
-                格式: IP:端口 或 域名:端口，不包含http://前缀
-              </p>
-            </div>
-          )}
+          {/* 配置折叠/展开按钮 */}
+          <div className="mb-4">
+            <button
+              onClick={() => setIsConfigCollapsed(!isConfigCollapsed)}
+              className={cn(
+                'flex w-full items-center justify-between rounded-lg border px-3 py-2 text-sm font-medium transition-colors hover:bg-opacity-80',
+                isLight
+                  ? 'border-gray-300 bg-gray-50 text-gray-700 hover:bg-gray-100'
+                  : 'border-gray-600 bg-gray-700 text-gray-300 hover:bg-gray-600',
+              )}>
+              <span>⚙️ 配置设置</span>
+              <span className={cn('transition-transform duration-200', isConfigCollapsed ? '' : 'rotate-180')}>▼</span>
+            </button>
+          </div>
 
-          {!isLoading && !isRetrying && (
-            <div className="mb-4">
-              <label
-                htmlFor="targetCount"
-                className={cn('mb-2 block text-sm font-medium', isLight ? 'text-gray-700' : 'text-gray-300')}>
-                处理条数:
-              </label>
-              <input
-                id="targetCount"
-                type="number"
-                min="1"
-                value={targetCount}
-                onChange={e => setTargetCount(e.target.value)}
-                placeholder="请输入要处理的用户数量"
-                className={cn(
-                  'w-full rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2',
-                  isLight
-                    ? 'border-gray-300 bg-white text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:ring-blue-500'
-                    : 'border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-400 focus:border-blue-400 focus:ring-blue-400',
-                )}
-              />
-              <p className={cn('mt-1 text-xs', isLight ? 'text-gray-500' : 'text-gray-400')}>
-                输入一个大于0的整数，如果超过API总数则以API总数为准
-              </p>
-            </div>
-          )}
-
-          {!isLoading && !isRetrying && (
-            <div className="mb-4">
-              <div className="mb-3">
-                <label className="flex items-center">
-                  <input
-                    type="checkbox"
-                    checked={isContinuousMode}
-                    onChange={e => setIsContinuousMode(e.target.checked)}
-                    className="mr-2"
-                  />
-                  <span className={cn('text-sm font-medium', isLight ? 'text-gray-700' : 'text-gray-300')}>
-                    启用连续监听模式
-                  </span>
-                </label>
-                <p className={cn('mt-1 text-xs', isLight ? 'text-gray-500' : 'text-gray-400')}>
-                  启用后将自动循环监听，失败用户优先处理
-                </p>
-              </div>
-
-              {isContinuousMode && (
-                <div>
+          {/* 配置区域 */}
+          {!isConfigCollapsed && (
+            <div
+              className={cn(
+                'mb-4 space-y-4 rounded-lg border p-4 transition-all duration-300',
+                isLight ? 'border-gray-200 bg-gray-50' : 'border-gray-600 bg-gray-700/30',
+              )}>
+              {!isLoading && !isRetrying && (
+                <div className="">
                   <label
-                    htmlFor="roundInterval"
+                    htmlFor="apiServerHost"
                     className={cn('mb-2 block text-sm font-medium', isLight ? 'text-gray-700' : 'text-gray-300')}>
-                    轮次间隔 (秒):
+                    API服务器地址:
                   </label>
                   <input
-                    id="roundInterval"
-                    type="number"
-                    min="1"
-                    max="60"
-                    value={roundInterval}
-                    onChange={e => setRoundInterval(e.target.value)}
-                    placeholder="30"
+                    id="apiServerHost"
+                    type="text"
+                    value={apiServerHost}
+                    onChange={e => setApiServerHost(e.target.value)}
+                    placeholder="请输入API服务器地址，如: 127.0.0.1:7072"
                     className={cn(
                       'w-full rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2',
                       isLight
@@ -1996,56 +1976,25 @@ const SidePanel = () => {
                     )}
                   />
                   <p className={cn('mt-1 text-xs', isLight ? 'text-gray-500' : 'text-gray-400')}>
-                    每轮处理完成后等待的时间，建议30-60秒
+                    格式: IP:端口 或 域名:端口，不包含http://前缀
                   </p>
                 </div>
               )}
-            </div>
-          )}
 
-          {!isLoading && !isRetrying && (
-            <div className="mb-4">
-              <label
-                htmlFor="changeThreshold"
-                className={cn('mb-2 block text-sm font-medium', isLight ? 'text-gray-700' : 'text-gray-300')}>
-                变化阈值 (人):
-              </label>
-              <input
-                id="changeThreshold"
-                type="number"
-                min="1"
-                max="500"
-                value={changeThreshold}
-                onChange={e => setChangeThreshold(e.target.value)}
-                placeholder="50"
-                className={cn(
-                  'w-full rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2',
-                  isLight
-                    ? 'border-gray-300 bg-white text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:ring-blue-500'
-                    : 'border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-400 focus:border-blue-400 focus:ring-blue-400',
-                )}
-              />
-              <p className={cn('mt-1 text-xs', isLight ? 'text-gray-500' : 'text-gray-400')}>
-                关注数变化超过此值时会触发二次验证，建议20-100
-              </p>
-            </div>
-          )}
-
-          {!isLoading && !isRetrying && (
-            <div className="mb-4">
-              <label className={cn('mb-2 block text-sm font-medium', isLight ? 'text-gray-700' : 'text-gray-300')}>
-                随机延迟时间 (秒):
-              </label>
-              <div className="flex gap-2">
-                <div className="flex-1">
+              {!isLoading && !isRetrying && (
+                <div className="">
+                  <label
+                    htmlFor="targetCount"
+                    className={cn('mb-2 block text-sm font-medium', isLight ? 'text-gray-700' : 'text-gray-300')}>
+                    处理条数:
+                  </label>
                   <input
-                    id="randomDelayMin"
+                    id="targetCount"
                     type="number"
                     min="1"
-                    max="60"
-                    value={randomDelayMin}
-                    onChange={e => setRandomDelayMin(e.target.value)}
-                    placeholder="最小值"
+                    value={targetCount}
+                    onChange={e => setTargetCount(e.target.value)}
+                    placeholder="请输入要处理的用户数量"
                     className={cn(
                       'w-full rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2',
                       isLight
@@ -2053,17 +2002,76 @@ const SidePanel = () => {
                         : 'border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-400 focus:border-blue-400 focus:ring-blue-400',
                     )}
                   />
+                  <p className={cn('mt-1 text-xs', isLight ? 'text-gray-500' : 'text-gray-400')}>
+                    输入一个大于0的整数，如果超过API总数则以API总数为准
+                  </p>
                 </div>
-                <span className={cn('flex items-center text-sm', isLight ? 'text-gray-700' : 'text-gray-300')}>-</span>
-                <div className="flex-1">
+              )}
+
+              {!isLoading && !isRetrying && (
+                <div className="mb-4">
+                  <div className="mb-3">
+                    <label className="flex items-center">
+                      <input
+                        type="checkbox"
+                        checked={isContinuousMode}
+                        onChange={e => setIsContinuousMode(e.target.checked)}
+                        className="mr-2"
+                      />
+                      <span className={cn('text-sm font-medium', isLight ? 'text-gray-700' : 'text-gray-300')}>
+                        启用连续监听模式
+                      </span>
+                    </label>
+                    <p className={cn('mt-1 text-xs', isLight ? 'text-gray-500' : 'text-gray-400')}>
+                      启用后将自动循环监听，失败用户优先处理
+                    </p>
+                  </div>
+
+                  {isContinuousMode && (
+                    <div>
+                      <label
+                        htmlFor="roundInterval"
+                        className={cn('mb-2 block text-sm font-medium', isLight ? 'text-gray-700' : 'text-gray-300')}>
+                        轮次间隔 (秒):
+                      </label>
+                      <input
+                        id="roundInterval"
+                        type="number"
+                        min="1"
+                        max="60"
+                        value={roundInterval}
+                        onChange={e => setRoundInterval(e.target.value)}
+                        placeholder="30"
+                        className={cn(
+                          'w-full rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2',
+                          isLight
+                            ? 'border-gray-300 bg-white text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:ring-blue-500'
+                            : 'border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-400 focus:border-blue-400 focus:ring-blue-400',
+                        )}
+                      />
+                      <p className={cn('mt-1 text-xs', isLight ? 'text-gray-500' : 'text-gray-400')}>
+                        每轮处理完成后等待的时间，建议30-60秒
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {!isLoading && !isRetrying && (
+                <div className="mb-4">
+                  <label
+                    htmlFor="changeThreshold"
+                    className={cn('mb-2 block text-sm font-medium', isLight ? 'text-gray-700' : 'text-gray-300')}>
+                    变化阈值 (人):
+                  </label>
                   <input
-                    id="randomDelayMax"
+                    id="changeThreshold"
                     type="number"
                     min="1"
-                    max="60"
-                    value={randomDelayMax}
-                    onChange={e => setRandomDelayMax(e.target.value)}
-                    placeholder="最大值"
+                    max="500"
+                    value={changeThreshold}
+                    onChange={e => setChangeThreshold(e.target.value)}
+                    placeholder="50"
                     className={cn(
                       'w-full rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2',
                       isLight
@@ -2071,67 +2079,117 @@ const SidePanel = () => {
                         : 'border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-400 focus:border-blue-400 focus:ring-blue-400',
                     )}
                   />
+                  <p className={cn('mt-1 text-xs', isLight ? 'text-gray-500' : 'text-gray-400')}>
+                    关注数变化超过此值时会触发二次验证，建议20-100
+                  </p>
                 </div>
-              </div>
-              <p className={cn('mt-1 text-xs', isLight ? 'text-gray-500' : 'text-gray-400')}>
-                处理每个用户后的随机等待时间，避免请求过于频繁
-              </p>
-            </div>
-          )}
+              )}
 
-          {!isLoading && !isRetrying && (
-            <div className="mb-4">
-              <label
-                htmlFor="proxyUrl"
-                className={cn('mb-2 block text-sm font-medium', isLight ? 'text-gray-700' : 'text-gray-300')}>
-                代理切换API地址:
-              </label>
-              <input
-                id="proxyUrl"
-                type="text"
-                value={proxyUrl}
-                onChange={e => setProxyUrl(e.target.value)}
-                placeholder="http://127.0.0.1:9090/proxies/辣条"
-                className={cn(
-                  'w-full rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2',
-                  isLight
-                    ? 'border-gray-300 bg-white text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:ring-blue-500'
-                    : 'border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-400 focus:border-blue-400 focus:ring-blue-400',
-                )}
-              />
-              <p className={cn('mt-1 text-xs', isLight ? 'text-gray-500' : 'text-gray-400')}>
-                代理切换API的完整URL地址
-              </p>
-            </div>
-          )}
+              {!isLoading && !isRetrying && (
+                <div className="mb-4">
+                  <label className={cn('mb-2 block text-sm font-medium', isLight ? 'text-gray-700' : 'text-gray-300')}>
+                    随机延迟时间 (秒):
+                  </label>
+                  <div className="flex gap-2">
+                    <div className="flex-1">
+                      <input
+                        id="randomDelayMin"
+                        type="number"
+                        min="1"
+                        max="60"
+                        value={randomDelayMin}
+                        onChange={e => setRandomDelayMin(e.target.value)}
+                        placeholder="最小值"
+                        className={cn(
+                          'w-full rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2',
+                          isLight
+                            ? 'border-gray-300 bg-white text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:ring-blue-500'
+                            : 'border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-400 focus:border-blue-400 focus:ring-blue-400',
+                        )}
+                      />
+                    </div>
+                    <span className={cn('flex items-center text-sm', isLight ? 'text-gray-700' : 'text-gray-300')}>
+                      -
+                    </span>
+                    <div className="flex-1">
+                      <input
+                        id="randomDelayMax"
+                        type="number"
+                        min="1"
+                        max="60"
+                        value={randomDelayMax}
+                        onChange={e => setRandomDelayMax(e.target.value)}
+                        placeholder="最大值"
+                        className={cn(
+                          'w-full rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2',
+                          isLight
+                            ? 'border-gray-300 bg-white text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:ring-blue-500'
+                            : 'border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-400 focus:border-blue-400 focus:ring-blue-400',
+                        )}
+                      />
+                    </div>
+                  </div>
+                  <p className={cn('mt-1 text-xs', isLight ? 'text-gray-500' : 'text-gray-400')}>
+                    处理每个用户后的随机等待时间，避免请求过于频繁
+                  </p>
+                </div>
+              )}
 
-          {!isLoading && !isRetrying && (
-            <div className="mb-4">
-              <label
-                htmlFor="proxyConfig"
-                className={cn('mb-2 block text-sm font-medium', isLight ? 'text-gray-700' : 'text-gray-300')}>
-                代理配置列表:
-              </label>
-              <textarea
-                id="proxyConfig"
-                value={proxyConfig}
-                onChange={e => setProxyConfig(e.target.value)}
-                placeholder='[{"name": "日本-联通中转"},{"name": "美国-联通中转"}]'
-                rows={3}
-                className={cn(
-                  'w-full rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2',
-                  isLight
-                    ? 'border-gray-300 bg-white text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:ring-blue-500'
-                    : 'border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-400 focus:border-blue-400 focus:ring-blue-400',
-                )}
-              />
-              <p className={cn('mt-1 text-xs', isLight ? 'text-gray-500' : 'text-gray-400')}>
-                JSON格式的代理配置数组，系统会随机选择一个代理进行切换
-              </p>
-              {currentProxy && (
-                <p className={cn('mt-1 text-xs font-medium', isLight ? 'text-green-600' : 'text-green-400')}>
-                  当前代理: {currentProxy}
-                </p>
+              {!isLoading && !isRetrying && (
+                <div className="mb-4">
+                  <label
+                    htmlFor="proxyUrl"
+                    className={cn('mb-2 block text-sm font-medium', isLight ? 'text-gray-700' : 'text-gray-300')}>
+                    代理切换API地址:
+                  </label>
+                  <input
+                    id="proxyUrl"
+                    type="text"
+                    value={proxyUrl}
+                    onChange={e => setProxyUrl(e.target.value)}
+                    placeholder="http://127.0.0.1:9090/proxies/辣条"
+                    className={cn(
+                      'w-full rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2',
+                      isLight
+                        ? 'border-gray-300 bg-white text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:ring-blue-500'
+                        : 'border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-400 focus:border-blue-400 focus:ring-blue-400',
+                    )}
+                  />
+                  <p className={cn('mt-1 text-xs', isLight ? 'text-gray-500' : 'text-gray-400')}>
+                    代理切换API的完整URL地址
+                  </p>
+                </div>
+              )}
+
+              {!isLoading && !isRetrying && (
+                <div className="mb-4">
+                  <label
+                    htmlFor="proxyConfig"
+                    className={cn('mb-2 block text-sm font-medium', isLight ? 'text-gray-700' : 'text-gray-300')}>
+                    代理配置列表:
+                  </label>
+                  <textarea
+                    id="proxyConfig"
+                    value={proxyConfig}
+                    onChange={e => setProxyConfig(e.target.value)}
+                    placeholder='[{"name": "日本-联通中转"},{"name": "美国-联通中转"}]'
+                    rows={3}
+                    className={cn(
+                      'w-full rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2',
+                      isLight
+                        ? 'border-gray-300 bg-white text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:ring-blue-500'
+                        : 'border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-400 focus:border-blue-400 focus:ring-blue-400',
+                    )}
+                  />
+                  <p className={cn('mt-1 text-xs', isLight ? 'text-gray-500' : 'text-gray-400')}>
+                    JSON格式的代理配置数组，系统会随机选择一个代理进行切换
+                  </p>
+                  {currentProxy && (
+                    <p className={cn('mt-1 text-xs font-medium', isLight ? 'text-green-600' : 'text-green-400')}>
+                      当前代理: {currentProxy}
+                    </p>
+                  )}
+                </div>
               )}
             </div>
           )}
@@ -2147,7 +2205,7 @@ const SidePanel = () => {
             </div>
           )}
 
-          {(isLoading || isRetrying) && (
+          {(isLoading || isRetrying || stats.total > 0) && (
             <div
               className={cn(
                 'mb-4 rounded-lg border p-3 text-sm',
@@ -2162,12 +2220,12 @@ const SidePanel = () => {
                 <div>无变化: {stats.skipped}</div>
                 <div>有变化: {stats.changed}</div>
                 <div>进度: {stats.total > 0 ? Math.round((stats.processed / stats.total) * 100) : 0}%</div>
-                <div>模式: {isRetrying ? '重试模式' : '正常模式'}</div>
+                <div>模式: {isRetrying ? '重试模式' : isLoading ? '处理中' : '已完成'}</div>
               </div>
             </div>
           )}
 
-          {isRetrying && retryStats.total > 0 && (
+          {(isRetrying || retryStats.total > 0) && (
             <div
               className={cn(
                 'mb-4 rounded-lg border p-3 text-sm',
@@ -2184,7 +2242,7 @@ const SidePanel = () => {
                 <div>
                   进度: {retryStats.total > 0 ? Math.round((retryStats.processed / retryStats.total) * 100) : 0}%
                 </div>
-                <div>分组处理: 10个/组</div>
+                <div>状态: {isRetrying ? '重试中' : '重试完成'}</div>
               </div>
             </div>
           )}
@@ -2240,16 +2298,15 @@ const SidePanel = () => {
           <div className="space-y-4">
             <div className="flex gap-2">
               {!isLoading && !isRetrying ? (
-                <button
-                  onClick={() => updateFollowingCounts(false)}
-                  disabled={
+                (() => {
+                  const isButtonDisabled =
                     !targetCount.trim() ||
                     isNaN(parseInt(targetCount.trim(), 10)) ||
                     parseInt(targetCount.trim(), 10) <= 0 ||
                     !changeThreshold.trim() ||
                     isNaN(parseInt(changeThreshold.trim(), 10)) ||
                     parseInt(changeThreshold.trim(), 10) <= 0 ||
-                    parseInt(changeThreshold.trim(), 10) > 500 ||
+                    parseInt(changeThreshold.trim(), 10) > 9999 ||
                     !apiServerHost.trim() ||
                     !randomDelayMin.trim() ||
                     !randomDelayMax.trim() ||
@@ -2262,35 +2319,69 @@ const SidePanel = () => {
                       (!roundInterval.trim() ||
                         isNaN(parseInt(roundInterval.trim(), 10)) ||
                         parseInt(roundInterval.trim(), 10) <= 0 ||
-                        parseInt(roundInterval.trim(), 10) > 60))
-                  }
-                  className={cn(
-                    'flex-1 rounded-lg px-4 py-3 font-bold shadow-lg transition-all duration-200',
-                    !targetCount.trim() ||
+                        parseInt(roundInterval.trim(), 10) > 60));
+
+                  console.log('🔍 按钮禁用状态检查:', {
+                    isButtonDisabled,
+                    targetCountCheck:
+                      !targetCount.trim() ||
                       isNaN(parseInt(targetCount.trim(), 10)) ||
-                      parseInt(targetCount.trim(), 10) <= 0 ||
-                      !apiServerHost.trim() ||
+                      parseInt(targetCount.trim(), 10) <= 0,
+                    changeThresholdCheck:
+                      !changeThreshold.trim() ||
+                      isNaN(parseInt(changeThreshold.trim(), 10)) ||
+                      parseInt(changeThreshold.trim(), 10) <= 0 ||
+                      parseInt(changeThreshold.trim(), 10) > 9999,
+                    apiServerHostCheck: !apiServerHost.trim(),
+                    randomDelayMinCheck:
                       !randomDelayMin.trim() ||
-                      !randomDelayMax.trim() ||
                       isNaN(parseInt(randomDelayMin.trim(), 10)) ||
+                      parseInt(randomDelayMin.trim(), 10) <= 0,
+                    randomDelayMaxCheck:
+                      !randomDelayMax.trim() ||
                       isNaN(parseInt(randomDelayMax.trim(), 10)) ||
-                      parseInt(randomDelayMin.trim(), 10) <= 0 ||
-                      parseInt(randomDelayMax.trim(), 10) <= 0 ||
-                      parseInt(randomDelayMin.trim(), 10) >= parseInt(randomDelayMax.trim(), 10) ||
-                      (isContinuousMode &&
-                        (!roundInterval.trim() ||
-                          isNaN(parseInt(roundInterval.trim(), 10)) ||
-                          parseInt(roundInterval.trim(), 10) <= 0 ||
-                          parseInt(roundInterval.trim(), 10) > 60))
-                      ? isLight
-                        ? 'cursor-not-allowed bg-gray-300 text-gray-500'
-                        : 'cursor-not-allowed bg-gray-600 text-gray-400'
-                      : isLight
-                        ? 'transform bg-blue-500 text-white hover:scale-105 hover:bg-blue-600 hover:shadow-xl'
-                        : 'transform bg-blue-600 text-white hover:scale-105 hover:bg-blue-700 hover:shadow-xl',
-                  )}>
-                  {isContinuousMode ? '🔄 开始连续监听' : '🚀 开始更新关注数'}
-                </button>
+                      parseInt(randomDelayMax.trim(), 10) <= 0,
+                    delayCompareCheck: parseInt(randomDelayMin.trim(), 10) >= parseInt(randomDelayMax.trim(), 10),
+                    continuousModeCheck:
+                      isContinuousMode &&
+                      (!roundInterval.trim() ||
+                        isNaN(parseInt(roundInterval.trim(), 10)) ||
+                        parseInt(roundInterval.trim(), 10) <= 0 ||
+                        parseInt(roundInterval.trim(), 10) > 60),
+                  });
+
+                  return (
+                    <button
+                      onClick={() => {
+                        console.log('🚀 按钮被点击了！');
+                        console.log('当前状态检查:', {
+                          isLoading,
+                          isRetrying,
+                          targetCount: targetCount.trim(),
+                          apiServerHost: apiServerHost.trim(),
+                          randomDelayMin: randomDelayMin.trim(),
+                          randomDelayMax: randomDelayMax.trim(),
+                          changeThreshold: changeThreshold.trim(),
+                          isContinuousMode,
+                          roundInterval: roundInterval.trim(),
+                        });
+                        updateFollowingCounts(false);
+                      }}
+                      disabled={isButtonDisabled}
+                      className={cn(
+                        'flex-1 rounded-lg px-4 py-3 font-bold shadow-lg transition-all duration-200',
+                        isButtonDisabled
+                          ? isLight
+                            ? 'cursor-not-allowed bg-gray-300 text-gray-500'
+                            : 'cursor-not-allowed bg-gray-600 text-gray-400'
+                          : isLight
+                            ? 'transform bg-blue-500 text-white hover:scale-105 hover:bg-blue-600 hover:shadow-xl'
+                            : 'transform bg-blue-600 text-white hover:scale-105 hover:bg-blue-700 hover:shadow-xl',
+                      )}>
+                      {isContinuousMode ? '🔄 开始连续监听' : '🚀 开始更新关注数'}
+                    </button>
+                  );
+                })()
               ) : (
                 <>
                   {!isPaused ? (
@@ -2328,7 +2419,7 @@ const SidePanel = () => {
               )}
             </div>
 
-            {(isLoading || isRetrying) && stats.total > 0 && (
+            {stats.total > 0 && (
               <div className="h-2 w-full rounded-full bg-gray-200">
                 <div
                   className="h-2 rounded-full bg-blue-600 transition-all duration-300"
@@ -2336,7 +2427,7 @@ const SidePanel = () => {
               </div>
             )}
 
-            {isRetrying && retryStats.total > 0 && (
+            {retryStats.total > 0 && (
               <div className="h-2 w-full rounded-full bg-gray-200">
                 <div
                   className="h-2 rounded-full bg-orange-600 transition-all duration-300"
