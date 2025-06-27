@@ -963,8 +963,8 @@ const SidePanel = () => {
 
               // 使用验证后的数据更新
               try {
-                // 在重试模式下，任何变化都要更新数据库；在正常模式下，只有增加时才更新
-                const shouldUpdate = isRetryMode ? finalNewAdditions !== 0 : finalNewAdditions > 0;
+                // 在重试模式下，任何变化都要更新数据库；在正常模式下，只要有变化就更新
+                const shouldUpdate = finalNewAdditions !== 0;
 
                 if (shouldUpdate) {
                   console.log(
@@ -976,7 +976,7 @@ const SidePanel = () => {
                   );
                 } else {
                   console.log(
-                    `📝 验证后${isRetryMode ? '重试模式下无变化' : '正常模式下非增长变化'}，跳过数据库更新 - ${user.screenName}`,
+                    `📝 验证后${isRetryMode ? '重试模式下无变化' : '正常模式下无变化'}，跳过数据库更新 - ${user.screenName}`,
                   );
                 }
               } catch (updateError) {
@@ -1054,8 +1054,8 @@ const SidePanel = () => {
 
         // 正常更新数据库
         try {
-          // 在重试模式下，任何变化都要更新数据库；在正常模式下，只有增加时才更新
-          const shouldUpdate = isRetryMode ? newAdditions !== 0 : newAdditions > 0;
+          // 在重试模式下，任何变化都要更新数据库；在正常模式下，只要有变化就更新
+          const shouldUpdate = newAdditions !== 0;
 
           if (shouldUpdate) {
             console.log(
@@ -1065,7 +1065,7 @@ const SidePanel = () => {
             console.log(`✅ 成功更新用户 ${user.screenName} 的数据库记录${isRetryMode ? '(重试模式)' : ''}`);
           } else {
             console.log(
-              `📝 ${isRetryMode ? '重试模式下无变化' : '正常模式下非增长变化'}，跳过数据库更新 - ${user.screenName}`,
+              `📝 ${isRetryMode ? '重试模式下无变化' : '正常模式下无变化'}，跳过数据库更新 - ${user.screenName}`,
             );
           }
         } catch (updateError) {
