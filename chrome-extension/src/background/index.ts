@@ -41,6 +41,9 @@ interface ClosedTabInfo {
 let closedTabsForRecovery = new Map<string, ClosedTabInfo[]>(); // 按操作ID分组存储被关闭的标签页
 let errorRecoveryInProgress = new Map<string, boolean>(); // 跟踪错误恢复进程状态
 
+// 新增：代理管理相关变量
+const PROXY_SWITCH_THRESHOLD = 150; // 处理用户数量阈值，超过此数量时切换代理
+
 // 关闭所有操作相关的标签页
 const closeAllOperationTabs = async (
   operationId?: string,
@@ -478,6 +481,73 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         timestamp: new Date().toLocaleString(),
       });
     }
+    return true;
+  }
+
+  if (request.action === 'switchProxy') {
+    console.log('收到手动切换代理请求');
+
+    switchProxyAutomatically()
+      .then(success => {
+        if (success) {
+          console.log('手动代理切换成功');
+          sendResponse({
+            success: true,
+            message: '代理切换成功',
+            timestamp: new Date().toLocaleString(),
+          });
+        } else {
+          console.error('手动代理切换失败');
+          sendResponse({
+            success: false,
+            error: '代理切换失败',
+            timestamp: new Date().toLocaleString(),
+          });
+        }
+      })
+      .catch(error => {
+        console.error('手动切换代理时出错:', error);
+        sendResponse({
+          success: false,
+          error: error.message,
+          timestamp: new Date().toLocaleString(),
+        });
+      });
+    return true;
+  }
+
+  // 新增：处理代理切换检查请求
+  if (request.action === 'checkProxySwitch') {
+    const { processedCount } = request;
+    console.log(`收到代理切换检查请求，当前已处理用户数: ${processedCount}`);
+
+    // 检查是否需要切换代理
+    if (processedCount > 0 && processedCount % PROXY_SWITCH_THRESHOLD === 0) {
+      console.log(`🔄 已处理用户数量(${processedCount})达到阈值(${PROXY_SWITCH_THRESHOLD})，开始切换代理...`);
+
+      switchProxyAutomatically()
+        .then(proxySwitched => {
+          if (proxySwitched) {
+            console.log('✅ 代理切换成功');
+            sendResponse({ success: true, switched: true, proxyName: '已切换' });
+          } else {
+            console.warn('⚠️ 代理切换失败');
+            sendResponse({ success: false, switched: false, error: '代理切换失败' });
+          }
+        })
+        .catch(proxyError => {
+          console.error('❌ 代理切换过程中出错:', proxyError);
+          sendResponse({
+            success: false,
+            switched: false,
+            error: proxyError instanceof Error ? proxyError.message : '未知错误',
+          });
+        });
+    } else {
+      console.log(`当前已处理用户数(${processedCount})未达到切换阈值(${PROXY_SWITCH_THRESHOLD})`);
+      sendResponse({ success: true, switched: false, reason: '未达到切换阈值' });
+    }
+
     return true;
   }
 });
@@ -1352,6 +1422,7 @@ const getFollowingCountFromTwitter = async (
         }
 
         retryAttempts.delete(key); // 成功时清除重试计数
+
         return followingCount;
       }
     }
@@ -2783,3 +2854,99 @@ cleanupAllExpiredData();
 
 console.log('Background loaded');
 console.log("Edit 'chrome-extension/src/background/index.ts' and save to reload.");
+
+// 新增：代理管理相关函数
+const parseProxyConfig = (configString: string): { name: string }[] => {
+  try {
+    const config = JSON.parse(configString);
+    if (Array.isArray(config)) {
+      return config.filter(item => item && typeof item.name === 'string');
+    }
+    return [];
+  } catch (error) {
+    console.error('解析代理配置失败:', error);
+    return [];
+  }
+};
+
+const selectRandomProxy = (proxies: { name: string }[], excludeProxy: string = ''): string => {
+  const availableProxies = proxies.filter(proxy => proxy.name !== excludeProxy);
+  if (availableProxies.length === 0) {
+    // 如果没有其他代理，返回第一个代理或空字符串
+    return proxies.length > 0 ? proxies[0].name : '';
+  }
+
+  const randomIndex = Math.floor(Math.random() * availableProxies.length);
+  return availableProxies[randomIndex].name;
+};
+
+const switchProxyAutomatically = async (): Promise<boolean> => {
+  try {
+    console.log('🔄 自动切换代理中...');
+
+    // 从localStorage获取代理配置
+    const result = await chrome.storage.local.get(['proxyUrl', 'proxyConfig', 'currentProxy']);
+    const proxyUrl = result.proxyUrl || 'http://127.0.0.1:9090/proxies/辣条';
+    const proxyConfig = result.proxyConfig || '[{"name": "日本-联通中转"},{"name": "美国-联通中转"}]';
+    const currentProxy = result.currentProxy || '';
+
+    console.log(`当前代理配置: URL=${proxyUrl}, 当前代理=${currentProxy}`);
+
+    // 解析代理配置
+    const proxies = parseProxyConfig(proxyConfig);
+    if (proxies.length === 0) {
+      console.error('❌ 代理配置为空或格式错误');
+      return false;
+    }
+
+    // 选择一个不同于当前代理的代理
+    const selectedProxy = selectRandomProxy(proxies, currentProxy);
+    if (!selectedProxy) {
+      console.error('❌ 没有可用的代理');
+      return false;
+    }
+
+    console.log(`🎯 选择代理: ${selectedProxy} (当前: ${currentProxy})`);
+
+    // 构建请求体
+    const requestBody = { name: selectedProxy };
+
+    // 发送代理切换请求
+    const response = await fetch(proxyUrl, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(requestBody),
+    });
+
+    if (!response.ok) {
+      throw new Error(`代理切换请求失败: ${response.status} ${response.statusText}`);
+    }
+
+    // 检查响应状态
+    const responseText = await response.text();
+    console.log(`✅ 代理切换响应:`, responseText);
+
+    // 更新存储的当前代理
+    await chrome.storage.local.set({ currentProxy: selectedProxy });
+
+    // 通知SidePanel代理切换成功
+    try {
+      chrome.runtime.sendMessage({
+        action: 'proxyChanged',
+        timestamp: new Date().toLocaleString(),
+        proxyName: selectedProxy,
+        reason: `处理用户数量超过${PROXY_SWITCH_THRESHOLD}，自动切换代理`,
+      });
+    } catch (msgError) {
+      console.warn('发送代理切换消息失败:', msgError);
+    }
+
+    console.log(`🎉 自动代理切换成功: ${selectedProxy}`);
+    return true;
+  } catch (error) {
+    console.error('❌ 自动代理切换失败:', error);
+    return false;
+  }
+};

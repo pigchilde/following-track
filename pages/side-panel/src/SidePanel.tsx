@@ -394,73 +394,36 @@ const SidePanel = () => {
       console.log('🔄 手动切换代理...');
       setProgress('🔄 正在切换代理...');
 
-      // 解析代理配置
-      const proxies = JSON.parse(proxyConfig);
-      if (!Array.isArray(proxies) || proxies.length === 0) {
-        throw new Error('代理配置为空或格式错误');
-      }
-
-      // 选择一个不同于当前代理的代理
-      const availableProxies = proxies.filter(proxy => proxy.name !== currentProxy);
-      if (availableProxies.length === 0) {
-        // 如果没有其他代理，重置为第一个代理
-        if (proxies.length > 0) {
-          availableProxies.push(proxies[0]);
-        }
-      }
-
-      if (availableProxies.length === 0) {
-        throw new Error('没有可用的代理');
-      }
-
-      const randomIndex = Math.floor(Math.random() * availableProxies.length);
-      const selectedProxy = availableProxies[randomIndex];
-
-      console.log(`🎯 选择代理: ${selectedProxy.name} (当前: ${currentProxy})`);
-
-      // 构建请求体
-      const requestBody = { name: selectedProxy.name };
-
-      // 发送代理切换请求
-      const response = await fetch(proxyUrl, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(requestBody),
+      // 调用background脚本进行代理切换
+      const response = await chrome.runtime.sendMessage({
+        action: 'switchProxy',
       });
 
-      if (!response.ok) {
-        throw new Error(`代理切换请求失败: ${response.status} ${response.statusText}`);
+      if (response.success) {
+        console.log('✅ 手动代理切换成功:', response);
+        setProgress('✅ 代理切换成功');
+
+        // 显示成功消息
+        setTimeout(() => {
+          setProgress('');
+        }, 3000);
+      } else {
+        console.error('❌ 手动代理切换失败:', response.error);
+        setProgress(`❌ 代理切换失败: ${response.error}`);
+
+        // 显示错误消息
+        setTimeout(() => {
+          setProgress('');
+        }, 5000);
       }
-
-      // 检查响应状态
-      const responseText = await response.text();
-      console.log(`✅ 代理切换响应:`, responseText);
-
-      // 更新当前代理状态
-      setCurrentProxy(selectedProxy.name);
-
-      // 显示成功消息
-      setProxyChangeStatus({
-        show: true,
-        timestamp: new Date().toLocaleString(),
-        proxyName: selectedProxy.name,
-        reason: `手动切换代理成功`,
-      });
-
-      setProgress(`✅ 代理已切换到: ${selectedProxy.name}`);
-
-      // 5秒后自动隐藏通知
-      setTimeout(() => {
-        setProxyChangeStatus(prev => (prev ? { ...prev, show: false } : null));
-      }, 5000);
-
-      console.log(`🎉 手动代理切换成功: ${selectedProxy.name}`);
     } catch (error) {
-      console.error('❌ 手动代理切换失败:', error);
-      const errorMessage = error instanceof Error ? error.message : '未知错误';
-      setProgress(`❌ 代理切换失败: ${errorMessage}`);
+      console.error('❌ 发送代理切换请求失败:', error);
+      setProgress(`❌ 代理切换请求失败: ${error instanceof Error ? error.message : '未知错误'}`);
+
+      // 显示错误消息
+      setTimeout(() => {
+        setProgress('');
+      }, 5000);
     }
   };
 
@@ -820,6 +783,30 @@ const SidePanel = () => {
     }
   };
 
+  // 新增：检查代理切换的函数
+  const checkProxySwitch = async () => {
+    try {
+      const currentProcessed = statsRef.current.processed;
+      console.log(`检查代理切换: 当前已处理用户数 ${currentProcessed}`);
+
+      const response = await chrome.runtime.sendMessage({
+        action: 'checkProxySwitch',
+        processedCount: currentProcessed,
+      });
+
+      if (response.success && response.switched) {
+        console.log('✅ 代理切换成功');
+        // 不需要显示通知，因为background会发送proxyChanged消息
+      } else if (response.success && !response.switched) {
+        console.log(`代理切换检查: ${response.reason || '未达到切换条件'}`);
+      } else {
+        console.warn('代理切换检查失败:', response.error);
+      }
+    } catch (error) {
+      console.error('代理切换检查时出错:', error);
+    }
+  };
+
   const processSingleUser = async (
     user: TwitterUser,
     operationId: string,
@@ -1002,6 +989,9 @@ const SidePanel = () => {
 
               incrementStats(isRetryMode, { successful: 1, changed: 1 });
 
+              // 成功处理用户后检查代理切换
+              await checkProxySwitch();
+
               console.log(
                 `用户 ${user.screenName} 关注数从 ${userFollowingCount} 变为 ${finalFollowingCount} (已验证)`,
               );
@@ -1030,6 +1020,9 @@ const SidePanel = () => {
               }
 
               incrementStats(isRetryMode, { successful: 1, skipped: 1 });
+
+              // 成功处理用户后检查代理切换
+              await checkProxySwitch();
 
               return null; // 不返回changeInfo，因为验证后实际没有变化
             }
@@ -1078,12 +1071,18 @@ const SidePanel = () => {
 
           incrementStats(isRetryMode, { successful: 1, skipped: 1 });
 
+          // 成功处理用户后检查代理切换
+          await checkProxySwitch();
+
           return null; // 不返回changeInfo，因为实际没有变化
         }
 
         const changeInfo = `${user.screenName} (ID: ${user.id}): ${userFollowingCount} → ${currentFollowingCount} (${newAdditions > 0 ? '+' : ''}${newAdditions})`;
 
         incrementStats(isRetryMode, { successful: 1, changed: 1 });
+
+        // 成功处理用户后检查代理切换
+        await checkProxySwitch();
 
         console.log(`用户 ${user.screenName} 关注数从 ${userFollowingCount} 变为 ${currentFollowingCount}`);
 
@@ -1108,6 +1107,9 @@ const SidePanel = () => {
           setFailedUsers(updatedFailedUsers);
         }
         incrementStats(isRetryMode, { successful: 1, skipped: 1 });
+
+        // 成功处理用户后检查代理切换
+        await checkProxySwitch();
       }
 
       return null;
