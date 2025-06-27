@@ -2886,8 +2886,9 @@ const switchProxyAutomatically = async (): Promise<boolean> => {
 
     // 从localStorage获取代理配置
     const result = await chrome.storage.local.get(['proxyUrl', 'proxyConfig', 'currentProxy']);
-    const proxyUrl = result.proxyUrl || 'http://127.0.0.1:9090/proxies/辣条';
-    const proxyConfig = result.proxyConfig || '[{"name": "日本-联通中转"},{"name": "美国-联通中转"}]';
+
+    const proxyUrl = result.proxyUrl;
+    const proxyConfig = result.proxyConfig;
     const currentProxy = result.currentProxy || '';
 
     console.log(`当前代理配置: URL=${proxyUrl}, 当前代理=${currentProxy}`);
@@ -2919,6 +2920,8 @@ const switchProxyAutomatically = async (): Promise<boolean> => {
       },
       body: JSON.stringify(requestBody),
     });
+
+    console.log(`🔄 代理切换请求: ${proxyUrl}`);
 
     if (!response.ok) {
       throw new Error(`代理切换请求失败: ${response.status} ${response.statusText}`);

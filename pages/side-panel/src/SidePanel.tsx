@@ -189,20 +189,75 @@ const SidePanel = () => {
     }
 
     // 新增：加载代理配置
-    const savedProxyUrl = localStorage.getItem('proxyUrl');
-    if (savedProxyUrl) {
-      setProxyUrl(savedProxyUrl);
-    }
+    const loadProxyConfig = async () => {
+      try {
+        const result = await chrome.storage.local.get(['proxyUrl', 'proxyConfig', 'currentProxy']);
+        console.log('chrome.storage.local 获取的代理配置:', result);
 
-    const savedProxyConfig = localStorage.getItem('proxyConfig');
-    if (savedProxyConfig) {
-      setProxyConfig(savedProxyConfig);
-    }
+        // 如果storage中没有配置，使用默认值并保存
+        const defaultProxyUrl = 'http://127.0.0.1:9090/proxies/辣条';
+        const defaultProxyConfig = '[{"name": "日本-联通中转"},{"name": "美国-联通中转"}]';
 
-    const savedCurrentProxy = localStorage.getItem('currentProxy');
-    if (savedCurrentProxy) {
-      setCurrentProxy(savedCurrentProxy);
-    }
+        let needsSync = false;
+
+        if (result.proxyUrl) {
+          setProxyUrl(result.proxyUrl);
+        } else {
+          // 检查localStorage中是否有旧数据
+          const savedProxyUrl = localStorage.getItem('proxyUrl');
+          const urlToUse = savedProxyUrl || defaultProxyUrl;
+          setProxyUrl(urlToUse);
+          await chrome.storage.local.set({ proxyUrl: urlToUse });
+          needsSync = true;
+        }
+
+        if (result.proxyConfig) {
+          setProxyConfig(result.proxyConfig);
+        } else {
+          // 检查localStorage中是否有旧数据
+          const savedProxyConfig = localStorage.getItem('proxyConfig');
+          const configToUse = savedProxyConfig || defaultProxyConfig;
+          setProxyConfig(configToUse);
+          await chrome.storage.local.set({ proxyConfig: configToUse });
+          needsSync = true;
+        }
+
+        if (result.currentProxy) {
+          setCurrentProxy(result.currentProxy);
+        } else {
+          // 检查localStorage中是否有旧数据
+          const savedCurrentProxy = localStorage.getItem('currentProxy');
+          if (savedCurrentProxy) {
+            setCurrentProxy(savedCurrentProxy);
+            await chrome.storage.local.set({ currentProxy: savedCurrentProxy });
+            needsSync = true;
+          }
+        }
+
+        if (needsSync) {
+          console.log('已同步代理配置到 chrome.storage.local');
+        }
+      } catch (error) {
+        console.error('加载代理配置失败:', error);
+        // 如果chrome.storage.local失败，尝试从localStorage读取
+        const savedProxyUrl = localStorage.getItem('proxyUrl');
+        if (savedProxyUrl) {
+          setProxyUrl(savedProxyUrl);
+        }
+
+        const savedProxyConfig = localStorage.getItem('proxyConfig');
+        if (savedProxyConfig) {
+          setProxyConfig(savedProxyConfig);
+        }
+
+        const savedCurrentProxy = localStorage.getItem('currentProxy');
+        if (savedCurrentProxy) {
+          setCurrentProxy(savedCurrentProxy);
+        }
+      }
+    };
+
+    loadProxyConfig();
 
     // 新增：加载配置折叠状态
     const savedConfigCollapsed = localStorage.getItem('configCollapsed');
@@ -343,22 +398,52 @@ const SidePanel = () => {
     }
   }, [randomDelayMax]);
 
-  // 新增：保存代理配置
+  // 新增：保存代理配置到chrome.storage.local
   useEffect(() => {
-    if (proxyUrl.trim()) {
-      localStorage.setItem('proxyUrl', proxyUrl);
+    if (proxyUrl && proxyUrl.trim()) {
+      console.log('保存 proxyUrl 到 chrome.storage.local:', proxyUrl);
+      chrome.storage.local
+        .set({ proxyUrl })
+        .then(() => {
+          console.log('proxyUrl 保存成功');
+        })
+        .catch(error => {
+          console.error('保存代理URL失败:', error);
+          // 备用方案：使用localStorage
+          localStorage.setItem('proxyUrl', proxyUrl);
+        });
     }
   }, [proxyUrl]);
 
   useEffect(() => {
-    if (proxyConfig.trim()) {
-      localStorage.setItem('proxyConfig', proxyConfig);
+    if (proxyConfig && proxyConfig.trim()) {
+      console.log('保存 proxyConfig 到 chrome.storage.local:', proxyConfig);
+      chrome.storage.local
+        .set({ proxyConfig })
+        .then(() => {
+          console.log('proxyConfig 保存成功');
+        })
+        .catch(error => {
+          console.error('保存代理配置失败:', error);
+          // 备用方案：使用localStorage
+          localStorage.setItem('proxyConfig', proxyConfig);
+        });
     }
   }, [proxyConfig]);
 
   useEffect(() => {
-    if (currentProxy.trim()) {
-      localStorage.setItem('currentProxy', currentProxy);
+    if (currentProxy && currentProxy.trim()) {
+      console.log('保存 currentProxy 到 chrome.storage.local:', currentProxy);
+      chrome.storage.local
+        .set({ currentProxy })
+        .then(() => {
+          console.log('currentProxy 保存成功');
+        })
+        .catch(error => {
+          console.error('保存当前代理失败:', error);
+          // 备用方案：使用localStorage
+          localStorage.setItem('currentProxy', currentProxy);
+        });
     }
   }, [currentProxy]);
 
@@ -1989,6 +2074,41 @@ const SidePanel = () => {
     }
   };
 
+  // 新增：手动同步代理配置函数
+  const syncProxyConfigManually = async () => {
+    try {
+      console.log('🔄 手动同步代理配置到 chrome.storage.local...');
+      setProgress('🔄 正在同步代理配置...');
+
+      const configToSync = {
+        proxyUrl: proxyUrl || 'http://127.0.0.1:9090/proxies/辣条',
+        proxyConfig: proxyConfig || '[{"name": "日本-联通中转"},{"name": "美国-联通中转"}]',
+        currentProxy: currentProxy || '',
+      };
+
+      await chrome.storage.local.set(configToSync);
+
+      // 验证同步结果
+      const result = await chrome.storage.local.get(['proxyUrl', 'proxyConfig', 'currentProxy']);
+      console.log('✅ 同步后的配置:', result);
+
+      setProgress('✅ 代理配置同步成功');
+
+      // 显示成功消息
+      setTimeout(() => {
+        setProgress('');
+      }, 3000);
+    } catch (error) {
+      console.error('❌ 同步代理配置失败:', error);
+      setProgress(`❌ 同步失败: ${error instanceof Error ? error.message : '未知错误'}`);
+
+      // 显示错误消息
+      setTimeout(() => {
+        setProgress('');
+      }, 5000);
+    }
+  };
+
   return (
     <div className={cn('App', isLight ? 'bg-slate-50' : 'bg-gray-800')}>
       <header className={cn('App-header', isLight ? 'text-gray-900' : 'text-gray-100')}>
@@ -2637,6 +2757,16 @@ const SidePanel = () => {
                       : 'bg-indigo-600 text-white hover:bg-indigo-700 hover:shadow-md',
                   )}>
                   🔄 切换代理
+                </button>
+                <button
+                  onClick={syncProxyConfigManually}
+                  className={cn(
+                    'flex-1 rounded-lg px-3 py-2 text-sm font-medium shadow transition-all duration-200',
+                    isLight
+                      ? 'bg-blue-500 text-white hover:bg-blue-600 hover:shadow-md'
+                      : 'bg-blue-600 text-white hover:bg-blue-700 hover:shadow-md',
+                  )}>
+                  💾 同步配置
                 </button>
               </div>
             )}
