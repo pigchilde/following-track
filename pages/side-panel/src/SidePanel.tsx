@@ -62,7 +62,7 @@ const SidePanel = () => {
   const [isRetrying, setIsRetrying] = useState(false);
   const [isContinuousMode, setIsContinuousMode] = useState(false);
   const [currentRound, setCurrentRound] = useState(1);
-  const [roundInterval, setRoundInterval] = useState('30');
+  const [roundInterval, setRoundInterval] = useState('10');
   const [changeThreshold, setChangeThreshold] = useState('50');
   const [nextRoundCountdown, setNextRoundCountdown] = useState(0);
   const [progress, setProgress] = useState('');
@@ -1475,6 +1475,58 @@ const SidePanel = () => {
     return allRetryResults;
   };
 
+  // 新增：执行轮次间操作的函数
+  const executeRoundTransitionOperations = async (isErrorRetry: boolean = false): Promise<void> => {
+    const operationType = isErrorRetry ? '错误重试' : '正常轮次切换';
+    console.log(`🔄 连续监听模式${operationType}：开始执行轮次间操作...`);
+    setProgress(prev => `${prev}\n🔄 连续监听模式${operationType}：开始执行轮次间操作...`);
+
+    // 1. 清除浏览器缓存
+    console.log('🧹 步骤1: 清除浏览器缓存...');
+    setProgress(prev => `${prev}\n🧹 步骤1: 清除浏览器缓存...`);
+    try {
+      const clearResponse = await chrome.runtime.sendMessage({
+        action: 'clearSiteData',
+      });
+
+      if (clearResponse.success) {
+        console.log('✅ 浏览器缓存清除成功');
+        setProgress(prev => `${prev}\n✅ 浏览器缓存清除成功`);
+      } else {
+        console.warn('⚠️ 浏览器缓存清除失败:', clearResponse.error);
+        setProgress(prev => `${prev}\n⚠️ 浏览器缓存清除失败: ${clearResponse.error || '未知错误'}`);
+      }
+    } catch (clearError) {
+      console.error('❌ 清除浏览器缓存时出错:', clearError);
+      setProgress(
+        prev => `${prev}\n❌ 清除浏览器缓存失败: ${clearError instanceof Error ? clearError.message : '未知错误'}`,
+      );
+    }
+
+    // 等待2秒
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    // 2. 切换代理
+    console.log('🔄 步骤2: 切换代理...');
+    setProgress(prev => `${prev}\n🔄 步骤2: 切换代理...`);
+    try {
+      const proxyResponse = await chrome.runtime.sendMessage({
+        action: 'switchProxy',
+      });
+
+      if (proxyResponse.success) {
+        console.log('✅ 代理切换成功:', proxyResponse);
+        setProgress(prev => `${prev}\n✅ 代理切换成功`);
+      } else {
+        console.warn('⚠️ 代理切换失败:', proxyResponse.error);
+        setProgress(prev => `${prev}\n⚠️ 代理切换失败: ${proxyResponse.error || '未知错误'}`);
+      }
+    } catch (proxyError) {
+      console.error('❌ 切换代理时出错:', proxyError);
+      setProgress(prev => `${prev}\n❌ 代理切换失败: ${proxyError instanceof Error ? proxyError.message : '未知错误'}`);
+    }
+  };
+
   const updateFollowingCounts = async (isNewRound: boolean = false) => {
     console.log('🔥 updateFollowingCounts 函数开始执行，参数:', { isNewRound });
     console.log('🔥 当前状态:', {
@@ -1710,6 +1762,11 @@ const SidePanel = () => {
               setProgress(prev => `${prev}\n❌ 无效的轮次间隔时间，停止连续监听`);
               setIsContinuousMode(false);
             } else {
+              // 执行轮次间操作：清除缓存、切换代理
+              await executeRoundTransitionOperations(false);
+
+              // 启动倒计时（使用原来的间隔时间）
+              console.log(`⏰ 启动倒计时，${intervalSeconds}秒后开始第 ${currentRound + 1} 轮`);
               setProgress(
                 prev => `${prev}\n⏰ 连续监听模式已启用，${intervalSeconds} 秒后开始第 ${currentRound + 1} 轮`,
               );
@@ -1737,8 +1794,13 @@ const SidePanel = () => {
         console.error(errorMessage);
 
         if (isContinuousMode && !shouldStopRef.current) {
-          setProgress(prev => `${prev}\n⚠️ 将在 ${roundInterval} 秒后重试...`);
+          // 执行轮次间操作：清除缓存、切换代理
+          await executeRoundTransitionOperations(true);
+
+          // 启动错误重试倒计时
           const intervalSeconds = parseInt(roundInterval, 10);
+          console.log(`⚠️ 启动错误重试倒计时，${intervalSeconds}秒后重试第 ${currentRound} 轮`);
+          setProgress(prev => `${prev}\n⚠️ 将在 ${intervalSeconds} 秒后重试...`);
           startCountdown(intervalSeconds);
           setTimeout(async () => {
             if (!shouldStopRef.current && isContinuousMode) {
