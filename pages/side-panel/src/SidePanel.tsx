@@ -2109,6 +2109,211 @@ const SidePanel = () => {
     }
   };
 
+  // 新增：解析host配置文件的函数
+  const parseHostConfigFile = async (file: File) => {
+    try {
+      console.log('🔄 开始解析host配置文件:', file.name);
+      setProgress('🔄 正在解析host配置文件...');
+
+      const text = await file.text();
+      console.log('📄 host配置文件内容:', text);
+
+      // 解析YAML格式的external-controller
+      const lines = text.split('\n');
+      let externalController = '';
+
+      // 查找 external-controller
+      for (const line of lines) {
+        const trimmedLine = line.trim();
+        if (trimmedLine.startsWith('external-controller:')) {
+          // 提取external-controller的值
+          const value = trimmedLine.split(':').slice(1).join(':').trim();
+          externalController = value;
+          break;
+        }
+      }
+
+      console.log('✅ 提取到的 external-controller:', externalController);
+
+      if (!externalController) {
+        throw new Error('未在配置文件中找到 external-controller 配置');
+      }
+
+      // 从external-controller中提取host和port
+      const hostMatch = externalController.match(/^([^:]+):(\d+)$/);
+      if (hostMatch) {
+        const host = hostMatch[1];
+        const port = hostMatch[2];
+
+        console.log('🎯 提取到的 host:', host);
+        console.log('🎯 提取到的 port:', port);
+
+        // 更新代理API地址中的host和port
+        const currentUrl = new URL(proxyUrl);
+        currentUrl.hostname = host;
+        currentUrl.port = port;
+
+        console.log('🔄 更新前的代理API地址:', proxyUrl);
+        const newUrl = currentUrl.toString();
+        console.log('🔄 更新后的代理API地址:', newUrl);
+
+        setProxyUrl(newUrl);
+        setProgress('✅ 成功更新代理API地址的host和port');
+      } else {
+        throw new Error('无法解析 external-controller 的格式');
+      }
+
+      // 显示成功消息
+      setTimeout(() => {
+        setProgress('');
+      }, 5000);
+    } catch (error) {
+      console.error('❌ 解析host配置文件失败:', error);
+      setProgress(`❌ 解析失败: ${error instanceof Error ? error.message : '未知错误'}`);
+
+      // 显示错误消息
+      setTimeout(() => {
+        setProgress('');
+      }, 5000);
+    }
+  };
+
+  // 新增：解析代理组配置文件的函数
+  const parseProxyGroupConfigFile = async (file: File) => {
+    try {
+      console.log('🔄 开始解析代理组配置文件:', file.name);
+      setProgress('🔄 正在解析代理组配置文件...');
+
+      const text = await file.text();
+      console.log('📄 代理组配置文件内容:', text);
+
+      // 解析YAML格式的proxy-groups
+      const lines = text.split('\n');
+      let proxyGroupName = '';
+
+      // 查找 proxy-groups 下的第一个 name
+      let inProxyGroups = false;
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const trimmedLine = line.trim();
+
+        if (trimmedLine.startsWith('proxy-groups:')) {
+          inProxyGroups = true;
+          continue;
+        }
+
+        if (inProxyGroups) {
+          // 如果遇到下一个顶级配置项，停止解析
+          if (
+            trimmedLine &&
+            !trimmedLine.startsWith('-') &&
+            !trimmedLine.startsWith(' ') &&
+            trimmedLine.includes(':') &&
+            !trimmedLine.includes('{')
+          ) {
+            break;
+          }
+
+          // 方法1：多行格式 - name: 值
+          if (trimmedLine.startsWith('- name:')) {
+            proxyGroupName = trimmedLine.replace('- name:', '').trim();
+            // 移除可能的引号
+            if (
+              (proxyGroupName.startsWith('"') && proxyGroupName.endsWith('"')) ||
+              (proxyGroupName.startsWith("'") && proxyGroupName.endsWith("'"))
+            ) {
+              proxyGroupName = proxyGroupName.slice(1, -1);
+            }
+            break;
+          }
+
+          // 方法2：内联格式 - { name: 值, ... }
+          if (trimmedLine.startsWith('-') && trimmedLine.includes('{') && trimmedLine.includes('name:')) {
+            // 提取内联格式中的 name 值
+            const nameMatch = trimmedLine.match(/name:\s*([^,}]+)/);
+            if (nameMatch) {
+              proxyGroupName = nameMatch[1].trim();
+              // 移除可能的引号
+              if (
+                (proxyGroupName.startsWith('"') && proxyGroupName.endsWith('"')) ||
+                (proxyGroupName.startsWith("'") && proxyGroupName.endsWith("'"))
+              ) {
+                proxyGroupName = proxyGroupName.slice(1, -1);
+              }
+              break;
+            }
+          }
+        }
+      }
+
+      console.log('✅ 提取到的第一个代理组名称:', proxyGroupName);
+
+      if (!proxyGroupName) {
+        throw new Error('未在配置文件中找到 proxy-groups 配置或无法解析代理组名称');
+      }
+
+      // 替换代理API地址中最后一个斜杠后的内容
+      const currentUrl = proxyUrl || 'http://127.0.0.1:9090/proxies/辣条';
+      const urlParts = currentUrl.split('/');
+      if (urlParts.length > 0) {
+        // 替换最后一个部分（代理组名称）
+        urlParts[urlParts.length - 1] = proxyGroupName;
+        const newProxyUrl = urlParts.join('/');
+
+        console.log('🔄 替换前的代理API地址:', currentUrl);
+        console.log('🔄 替换后的代理API地址:', newProxyUrl);
+
+        setProxyUrl(newProxyUrl);
+        setProgress('✅ 成功更新代理组名称');
+      }
+
+      // 显示成功消息
+      setTimeout(() => {
+        setProgress('');
+      }, 5000);
+    } catch (error) {
+      console.error('❌ 解析代理组配置文件失败:', error);
+      setProgress(`❌ 解析失败: ${error instanceof Error ? error.message : '未知错误'}`);
+
+      // 显示错误消息
+      setTimeout(() => {
+        setProgress('');
+      }, 5000);
+    }
+  };
+
+  // 新增：处理host配置文件上传
+  const handleHostConfigUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      // 验证文件格式
+      if (!file.name.endsWith('.yaml') && !file.name.endsWith('.yml')) {
+        setProgress('❌ 请选择 .yaml 或 .yml 格式的配置文件');
+        setTimeout(() => setProgress(''), 3000);
+        return;
+      }
+      parseHostConfigFile(file);
+    }
+    // 清空input值，允许重复选择同一文件
+    event.target.value = '';
+  };
+
+  // 新增：处理代理组配置文件上传
+  const handleProxyGroupConfigUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      // 验证文件格式
+      if (!file.name.endsWith('.yaml') && !file.name.endsWith('.yml')) {
+        setProgress('❌ 请选择 .yaml 或 .yml 格式的配置文件');
+        setTimeout(() => setProgress(''), 3000);
+        return;
+      }
+      parseProxyGroupConfigFile(file);
+    }
+    // 清空input值，允许重复选择同一文件
+    event.target.value = '';
+  };
+
   return (
     <div className={cn('App', isLight ? 'bg-slate-50' : 'bg-gray-800')}>
       <header className={cn('App-header', isLight ? 'text-gray-900' : 'text-gray-100')}>
@@ -2324,21 +2529,60 @@ const SidePanel = () => {
                     className={cn('mb-2 block text-sm font-medium', isLight ? 'text-gray-700' : 'text-gray-300')}>
                     代理切换API地址:
                   </label>
-                  <input
-                    id="proxyUrl"
-                    type="text"
-                    value={proxyUrl}
-                    onChange={e => setProxyUrl(e.target.value)}
-                    placeholder="http://127.0.0.1:9090/proxies/辣条"
-                    className={cn(
-                      'w-full rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2',
-                      isLight
-                        ? 'border-gray-300 bg-white text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:ring-blue-500'
-                        : 'border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-400 focus:border-blue-400 focus:ring-blue-400',
-                    )}
-                  />
+                  <div className="mb-2 flex gap-2">
+                    <label
+                      htmlFor="hostConfigFileInput"
+                      className={cn(
+                        'flex-1 cursor-pointer rounded-lg border px-3 py-2 text-sm font-medium transition-colors hover:bg-opacity-80',
+                        isLight
+                          ? 'border-gray-300 bg-green-100 text-green-700 hover:bg-green-200'
+                          : 'border-green-600 bg-green-600 text-green-200 hover:bg-green-500',
+                      )}>
+                      📁 上传Host配置
+                    </label>
+                    <input
+                      id="hostConfigFileInput"
+                      type="file"
+                      accept=".yaml,.yml"
+                      onChange={handleHostConfigUpload}
+                      className="hidden"
+                    />
+                    <label
+                      htmlFor="proxyGroupConfigFileInput"
+                      className={cn(
+                        'flex-1 cursor-pointer rounded-lg border px-3 py-2 text-sm font-medium transition-colors hover:bg-opacity-80',
+                        isLight
+                          ? 'border-gray-300 bg-blue-100 text-blue-700 hover:bg-blue-200'
+                          : 'border-blue-600 bg-blue-600 text-blue-200 hover:bg-blue-500',
+                      )}>
+                      📁 上传代理组配置
+                    </label>
+                    <input
+                      id="proxyGroupConfigFileInput"
+                      type="file"
+                      accept=".yaml,.yml"
+                      onChange={handleProxyGroupConfigUpload}
+                      className="hidden"
+                    />
+                  </div>
+                  <div className="flex gap-2">
+                    <input
+                      id="proxyUrl"
+                      type="text"
+                      value={proxyUrl}
+                      onChange={e => setProxyUrl(e.target.value)}
+                      placeholder="http://127.0.0.1:9090/proxies/辣条"
+                      className={cn(
+                        'flex-1 rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2',
+                        isLight
+                          ? 'border-gray-300 bg-white text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:ring-blue-500'
+                          : 'border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-400 focus:border-blue-400 focus:ring-blue-400',
+                      )}
+                    />
+                  </div>
                   <p className={cn('mt-1 text-xs', isLight ? 'text-gray-500' : 'text-gray-400')}>
-                    代理切换API的完整URL地址
+                    代理切换API的完整URL地址，可上传 config.yaml 文件自动提取 host
+                    值，或上传代理组配置文件提取代理组名称
                   </p>
                 </div>
               )}
