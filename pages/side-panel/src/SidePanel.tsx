@@ -620,6 +620,12 @@ const SidePanel = () => {
   // 添加当前操作ID状态
   const [currentOperationId, setCurrentOperationId] = useState<string | null>(null);
 
+  // 新增：时间统计相关状态
+  const [roundStartTime, setRoundStartTime] = useState<number | null>(null);
+  const [roundDuration, setRoundDuration] = useState<string>('');
+  const [totalProcessingTime, setTotalProcessingTime] = useState<string>('');
+  const roundStartTimeRef = useRef<number | null>(null);
+
   const operationIdRef = useRef<string | null>(null);
   const shouldStopRef = useRef(false);
   const countdownTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -988,6 +994,23 @@ const SidePanel = () => {
     return id;
   };
 
+  // 新增：格式化时间差的辅助函数
+  const formatDuration = (milliseconds: number): string => {
+    console.log(`🕐 formatDuration 输入: ${milliseconds}ms`);
+    const totalSeconds = Math.floor(milliseconds / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+
+    let result;
+    if (minutes > 0) {
+      result = `${minutes}分${seconds}秒`;
+    } else {
+      result = `${seconds}秒`;
+    }
+    console.log(`🕐 formatDuration 输出: ${result}`);
+    return result;
+  };
+
   // 新增：手动切换代理函数
   const switchProxyManually = async () => {
     try {
@@ -1201,6 +1224,12 @@ const SidePanel = () => {
       setIsProcessing(true);
       setIsLoading(true);
 
+      // 记录开始时间
+      const startTime = Date.now();
+      setRoundStartTime(startTime);
+      roundStartTimeRef.current = startTime;
+      console.log(`🕐 队列处理开始时间: ${new Date(startTime).toLocaleString()}`);
+
       // 清空队列管理器
       queueManager.clear();
 
@@ -1247,11 +1276,14 @@ const SidePanel = () => {
           `处理中: ${currentQueueStatus.processing} | 已完成: ${currentQueueStatus.completed} | 失败: ${currentQueueStatus.failed} | 待处理: ${currentQueueStatus.pending} | 重试: ${currentQueueStatus.retry}`,
         );
 
-        // 更新统计数据
+        // 更新统计数据（使用队列状态，避免重复计数）
         updateStats(false, {
+          total: currentQueueStatus.total,
           processed: totalProcessed,
           successful: currentQueueStatus.completed,
           failed: currentQueueStatus.failed,
+          changed: stats.changed, // 保持已计算的变化数
+          skipped: stats.skipped, // 保持已计算的跳过数
         });
 
         // 检查是否全部完成
@@ -1273,12 +1305,35 @@ const SidePanel = () => {
     setIsProcessing(false);
     setIsLoading(false);
 
+    // 计算处理耗时
+    const endTime = Date.now();
+    const duration = roundStartTimeRef.current ? endTime - roundStartTimeRef.current : 0;
+    const durationText = formatDuration(duration);
+    setRoundDuration(durationText);
+
     console.log(`🎉 队列处理完成! 成功: ${finalStatus.completed}, 失败: ${finalStatus.failed}`);
-    setProgress(`✅ 处理完成! 成功: ${finalStatus.completed}, 失败: ${finalStatus.failed}`);
+    console.log(
+      `⏱️ 本轮处理耗时: ${durationText} (开始时间: ${roundStartTimeRef.current}, 结束时间: ${endTime}, 时长: ${duration}ms)`,
+    );
+
+    setProgress(`✅ 处理完成! 成功: ${finalStatus.completed}, 失败: ${finalStatus.failed} | ⏱️ 耗时: ${durationText}`);
 
     // 处理完成的用户 - 更新数据库
     const completedUsers = queueManager.getCompletedUsers();
     const failedUserInfos = queueManager.getFailedUsers();
+
+    // 更新最终统计数据（使用队列的准确数据）
+    updateStats(false, {
+      total: finalStatus.total,
+      processed: finalStatus.completed + finalStatus.failed,
+      successful: finalStatus.completed,
+      failed: finalStatus.failed,
+      changed: 0, // 先重置，下面会重新计算
+      skipped: 0, // 先重置，下面会重新计算
+    });
+
+    let actualChanged = 0;
+    let actualSkipped = 0;
 
     // 处理成功的用户，调用updateUser API
     completedUsers.forEach(async completedUser => {
@@ -1293,16 +1348,21 @@ const SidePanel = () => {
           // 添加到新用户列表
           if (newAdditions > 0) {
             setNewUsers(prev => [...prev, `${user.screenName} (+${newAdditions})`]);
-            incrementStats(false, { changed: 1 });
           }
+          actualChanged++;
         } else {
           console.log(`用户 ${user.screenName} 关注数无变化: ${result}`);
-          incrementStats(false, { skipped: 1 });
+          actualSkipped++;
         }
       } catch (error) {
         console.error(`更新用户 ${completedUser.user.screenName} 失败:`, error);
       }
     });
+
+    // 最终更新changed和skipped的准确数据
+    setTimeout(() => {
+      updateStats(false, { changed: actualChanged, skipped: actualSkipped });
+    }, 100);
 
     // 处理失败的用户，添加到失败列表
     failedUserInfos.forEach(failedUserInfo => {
@@ -1375,6 +1435,11 @@ const SidePanel = () => {
         busy: 0,
         details: [],
       });
+
+      // 清除时间统计
+      setRoundStartTime(null);
+      setRoundDuration('');
+      roundStartTimeRef.current = null;
 
       // 同时停止background的操作
       if (operationIdRef.current) {
@@ -1518,6 +1583,11 @@ const SidePanel = () => {
     setProgress('操作已停止');
     setCurrentUser(null);
     setCurrentRound(1);
+
+    // 清除时间统计
+    setRoundStartTime(null);
+    setRoundDuration('');
+    roundStartTimeRef.current = null;
   };
 
   // 辅助函数：更新统计数据
@@ -1642,10 +1712,12 @@ const SidePanel = () => {
         // 重试模式下失败的用户也要记录，等待下一轮重试
         saveFailedUser(user, error);
 
+        // 注意：在队列处理模式下，统计由队列管理器负责，不需要在这里重复计数
         if (isRetryMode) {
           incrementStats(true, { processed: 1, failed: 1 });
         } else {
-          incrementStats(false, { processed: 1, failed: 1 });
+          // 队列处理模式下不重复计数，由队列管理器处理
+          // incrementStats(false, { processed: 1, failed: 1 });
         }
 
         setProgress(`用户 ${user.screenName} (ID: ${user.id}) 处理失败: ${error}`);
@@ -1668,7 +1740,11 @@ const SidePanel = () => {
       console.log(`- 不等比较 (!=): ${currentFollowingCount != userFollowingCount}`);
       console.log(`- 严格不等比较 (!==): ${currentFollowingCount !== userFollowingCount}`);
 
-      incrementStats(isRetryMode, { processed: 1 });
+      // 注意：在队列处理模式下，统计由队列管理器负责，不需要在这里重复计数
+      if (isRetryMode) {
+        incrementStats(isRetryMode, { processed: 1 });
+      }
+      // 队列处理模式下不重复计数，由队列管理器处理
 
       if (currentFollowingCount !== userFollowingCount) {
         console.log(`🔄 检测到关注数变化，准备验证变化幅度...`);
@@ -1700,7 +1776,10 @@ const SidePanel = () => {
               console.error(`用户 ${user.screenName} ${error}`);
               // 重试模式下失败的用户也要记录，等待下一轮重试
               saveFailedUser(user, error);
-              incrementStats(true, { processed: 1, failed: 1 });
+              // 注意：在队列处理模式下，统计由队列管理器负责
+              if (isRetryMode) {
+                incrementStats(true, { processed: 1, failed: 1 });
+              }
               setProgress(`用户 ${user.screenName} (ID: ${user.id}) 验证失败: ${error}`);
               return null;
             }
@@ -1714,7 +1793,10 @@ const SidePanel = () => {
               const error = `关注数变化异常: ${userFollowingCount} → ${currentFollowingCount} (变化${changeAmount}人)`;
               // 重试模式下失败的用户也要记录，等待下一轮重试
               saveFailedUser(user, error);
-              incrementStats(true, { processed: 1, failed: 1 });
+              // 注意：在队列处理模式下，统计由队列管理器负责
+              if (isRetryMode) {
+                incrementStats(true, { processed: 1, failed: 1 });
+              }
               setProgress(`用户 ${user.screenName} (ID: ${user.id}) 数据异常: ${error}`);
               return null;
             }
@@ -1733,7 +1815,10 @@ const SidePanel = () => {
                 const error = `验证后关注数变化仍异常: ${userFollowingCount} → ${finalFollowingCount} (变化${finalChangeAmount}人)`;
                 // 重试模式下失败的用户也要记录，等待下一轮重试
                 saveFailedUser(user, error);
-                incrementStats(true, { processed: 1, failed: 1 });
+                // 注意：在队列处理模式下，统计由队列管理器负责
+                if (isRetryMode) {
+                  incrementStats(true, { processed: 1, failed: 1 });
+                }
                 setProgress(`用户 ${user.screenName} (ID: ${user.id}) 验证后数据仍异常: ${error}`);
                 return null;
               }
@@ -1771,14 +1856,20 @@ const SidePanel = () => {
                   setFailedUsers(updatedFailedUsers);
                 }
 
-                incrementStats(isRetryMode, { successful: 1, skipped: 1 });
+                // 注意：在队列处理模式下，统计由队列管理器负责
+                if (isRetryMode) {
+                  incrementStats(isRetryMode, { successful: 1, skipped: 1 });
+                }
 
                 return null; // 不返回changeInfo，因为验证后实际没有变化
               }
 
               const changeInfo = `${user.screenName} (ID: ${user.id}): ${userFollowingCount} → ${finalFollowingCount} (${finalNewAdditions > 0 ? '+' : ''}${finalNewAdditions}) [已验证]`;
 
-              incrementStats(isRetryMode, { successful: 1, changed: 1 });
+              // 注意：在队列处理模式下，统计由队列管理器负责
+              if (isRetryMode) {
+                incrementStats(isRetryMode, { successful: 1, changed: 1 });
+              }
 
               // 成功处理用户后检查代理切换
               await checkProxySwitch();
@@ -1810,7 +1901,10 @@ const SidePanel = () => {
                 setFailedUsers(updatedFailedUsers);
               }
 
-              incrementStats(isRetryMode, { successful: 1, skipped: 1 });
+              // 注意：在队列处理模式下，统计由队列管理器负责
+              if (isRetryMode) {
+                incrementStats(isRetryMode, { successful: 1, skipped: 1 });
+              }
 
               // 成功处理用户后检查代理切换
               await checkProxySwitch();
@@ -1822,8 +1916,11 @@ const SidePanel = () => {
             const error = `验证关注数失败: ${verifyError instanceof Error ? verifyError.message : '未知错误'}`;
             if (!isRetryMode) {
               saveFailedUser(user, error);
+              // 注意：在队列处理模式下，统计由队列管理器负责，不在这里重复计数
+              // incrementStats(false, { processed: 1, failed: 1 });
+            } else {
+              incrementStats(false, { processed: 1, failed: 1 });
             }
-            incrementStats(false, { processed: 1, failed: 1 });
             setProgress(`用户 ${user.screenName} (ID: ${user.id}) 验证失败: ${error}`);
             return null;
           }
@@ -1860,7 +1957,10 @@ const SidePanel = () => {
             setFailedUsers(updatedFailedUsers);
           }
 
-          incrementStats(isRetryMode, { successful: 1, skipped: 1 });
+          // 注意：在队列处理模式下，统计由队列管理器负责
+          if (isRetryMode) {
+            incrementStats(isRetryMode, { successful: 1, skipped: 1 });
+          }
 
           // 成功处理用户后检查代理切换
           await checkProxySwitch();
@@ -1870,7 +1970,10 @@ const SidePanel = () => {
 
         const changeInfo = `${user.screenName} (ID: ${user.id}): ${userFollowingCount} → ${currentFollowingCount} (${newAdditions > 0 ? '+' : ''}${newAdditions})`;
 
-        incrementStats(isRetryMode, { successful: 1, changed: 1 });
+        // 注意：在队列处理模式下，统计由队列管理器负责
+        if (isRetryMode) {
+          incrementStats(isRetryMode, { successful: 1, changed: 1 });
+        }
 
         // 成功处理用户后检查代理切换
         await checkProxySwitch();
@@ -1897,7 +2000,10 @@ const SidePanel = () => {
           localStorage.setItem('failedTwitterUsers', JSON.stringify(updatedFailedUsers));
           setFailedUsers(updatedFailedUsers);
         }
-        incrementStats(isRetryMode, { successful: 1, skipped: 1 });
+        // 注意：在队列处理模式下，统计由队列管理器负责
+        if (isRetryMode) {
+          incrementStats(isRetryMode, { successful: 1, skipped: 1 });
+        }
 
         // 成功处理用户后检查代理切换
         await checkProxySwitch();
@@ -1916,7 +2022,11 @@ const SidePanel = () => {
       // 重试模式下失败的用户也要记录，等待下一轮重试
       saveFailedUser(user, errorMsg);
 
-      incrementStats(false, { processed: 1, failed: 1 });
+      // 注意：在队列处理模式下，统计由队列管理器负责
+      if (isRetryMode) {
+        incrementStats(false, { processed: 1, failed: 1 });
+      }
+      // 队列处理模式下不重复计数，由队列管理器处理
       setProgress(`处理 ${user.screenName} (ID: ${user.id}) 时出错: ${errorMsg}`);
 
       return null;
@@ -2343,6 +2453,12 @@ const SidePanel = () => {
         setCurrentRound(1);
       }
 
+      // 记录开始时间
+      const startTime = Date.now();
+      setRoundStartTime(startTime);
+      roundStartTimeRef.current = startTime;
+      console.log(`🕐 第 ${currentRound} 轮处理开始时间: ${new Date(startTime).toLocaleString()}`);
+
       const roundText = isContinuousMode ? `第 ${currentRound} 轮 - ` : '';
       setProgress(`${roundText}正在获取用户列表...`);
       setCurrentUser(null);
@@ -2493,9 +2609,17 @@ const SidePanel = () => {
 
           // 获取最终的失败用户数量（重试后可能有变化）
           const finalFailedCountAfterRetry = JSON.parse(localStorage.getItem('failedTwitterUsers') || '[]').length;
-          const finalCompletionMessage = `✅ 第 ${currentRound} 轮全部处理完成！${finalFailedCountAfterRetry > 0 ? `还有 ${finalFailedCountAfterRetry} 个用户处理失败，将在下一轮继续重试。` : '所有用户处理成功！'}`;
+
+          // 计算处理耗时
+          const endTime = Date.now();
+          const duration = roundStartTimeRef.current ? endTime - roundStartTimeRef.current : 0;
+          const durationText = formatDuration(duration);
+          setRoundDuration(durationText);
+
+          const finalCompletionMessage = `✅ 第 ${currentRound} 轮全部处理完成！${finalFailedCountAfterRetry > 0 ? `还有 ${finalFailedCountAfterRetry} 个用户处理失败，将在下一轮继续重试。` : '所有用户处理成功！'} | ⏱️ 耗时: ${durationText}`;
           setProgress(prev => `${prev}\n${finalCompletionMessage}`);
           console.log(finalCompletionMessage);
+          console.log(`⏱️ 第 ${currentRound} 轮处理耗时: ${durationText}`);
 
           // 在每轮完成后自动关闭所有标签页
           console.log(`第 ${currentRound} 轮完成，开始关闭所有标签页...`);
@@ -3324,6 +3448,9 @@ const SidePanel = () => {
               )}>
               <div className="font-semibold">🔄 连续监听模式 - 第 {currentRound} 轮</div>
               {nextRoundCountdown > 0 && <div className="mt-1">⏰ 下一轮开始倒计时: {nextRoundCountdown}秒</div>}
+              {roundDuration && !isLoading && (
+                <div className="mt-1 text-sm text-blue-600">⏱️ 上轮耗时: {roundDuration}</div>
+              )}
             </div>
           )}
 
@@ -3345,6 +3472,9 @@ const SidePanel = () => {
                 <div>
                   模式: {isRetrying ? '重试模式' : isProcessing ? '队列处理中' : isLoading ? '处理中' : '已完成'}
                 </div>
+                {roundDuration && (
+                  <div className="col-span-2 text-center font-semibold text-blue-600">⏱️ 本轮耗时: {roundDuration}</div>
+                )}
               </div>
             </div>
           )}
