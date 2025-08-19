@@ -28,6 +28,9 @@ let retryAttempts = new Map<string, number>(); // 用于记录重试次数
 let tabsMap = new Map<string, number>(); // 存储操作ID到标签页ID的映射
 let currentTabId: number | null = null; // 添加全局变量跟踪当前标签页ID
 
+// 新增：工作线程标签页管理
+let workerTabsMap = new Map<string, number>(); // workerId -> tabId 映射
+
 // 新增：用于存储错误处理期间关闭的标签页信息
 interface ClosedTabInfo {
   id: number;
@@ -73,9 +76,9 @@ const closeAllOperationTabs = async (
         }
       }
     } else {
-      // 关闭所有映射中的标签页
+      // 1. 关闭所有传统映射中的标签页
       const tabsToClose = Array.from(tabsMap.entries());
-      console.log(`准备关闭 ${tabsToClose.length} 个标签页`);
+      console.log(`准备关闭传统映射中的 ${tabsToClose.length} 个标签页`);
 
       for (const [opId, tabId] of tabsToClose) {
         try {
@@ -88,6 +91,48 @@ const closeAllOperationTabs = async (
           console.error(errorMsg);
           errors.push(errorMsg);
         }
+      }
+
+      // 2. 关闭所有工作线程标签页
+      const workerTabsToClose = Array.from(workerTabsMap.entries());
+      console.log(`准备关闭工作线程映射中的 ${workerTabsToClose.length} 个标签页`);
+
+      for (const [workerId, tabId] of workerTabsToClose) {
+        try {
+          await chrome.tabs.remove(tabId);
+          console.log(`关闭工作线程 ${workerId} 的标签页 ${tabId}`);
+          workerTabsMap.delete(workerId);
+          closedCount++;
+        } catch (error) {
+          const errorMsg = `关闭工作线程标签页 ${tabId} (工作线程: ${workerId}) 失败: ${error instanceof Error ? error.message : '未知错误'}`;
+          console.error(errorMsg);
+          errors.push(errorMsg);
+        }
+      }
+
+      // 3. 额外保险：直接查询并关闭所有Twitter相关标签页
+      try {
+        const allTwitterTabs = await chrome.tabs.query({
+          url: ['*://twitter.com/*', '*://x.com/*', '*://www.twitter.com/*', '*://www.x.com/*'],
+        });
+
+        console.log(`发现额外的 ${allTwitterTabs.length} 个Twitter标签页`);
+
+        for (const tab of allTwitterTabs) {
+          if (tab.id) {
+            try {
+              await chrome.tabs.remove(tab.id);
+              console.log(`关闭额外的Twitter标签页: ${tab.url} (ID: ${tab.id})`);
+              closedCount++;
+            } catch (error) {
+              const errorMsg = `关闭额外Twitter标签页 ${tab.id} 失败: ${error instanceof Error ? error.message : '未知错误'}`;
+              console.error(errorMsg);
+              errors.push(errorMsg);
+            }
+          }
+        }
+      } catch (queryError) {
+        console.warn('查询Twitter标签页时出错:', queryError);
       }
     }
 
@@ -319,22 +364,50 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       return true;
     }
 
-    // 处理获取 Twitter 关注数的请求
-    getFollowingCountFromTwitter(request.screenName, request.operationId, request.reuseTab || false)
-      .then(count => {
-        console.log(`成功获取 ${request.screenName} 的关注数: ${count}，准备返回结果`);
-        const response = { success: true, count: count };
-        console.log(`发送响应到 SidePanel:`, JSON.stringify(response, null, 2));
-        sendResponse(response);
-        console.log(`响应已发送完成`);
-      })
-      .catch(error => {
-        console.error('获取关注数时出错:', error);
-        const errorResponse = { success: false, error: error.message };
-        console.log(`发送错误响应到 SidePanel:`, JSON.stringify(errorResponse, null, 2));
-        sendResponse(errorResponse);
-        console.log(`错误响应已发送完成`);
-      });
+    // 处理获取 Twitter 关注数的请求 - 支持工作线程
+    const { screenName, operationId, reuseTab, workerId } = request;
+
+    // 如果有workerId，使用工作线程处理逻辑
+    if (workerId) {
+      handleWorkerRequest(screenName, operationId, workerId, reuseTab || false)
+        .then(result => {
+          console.log(`工作线程 ${workerId} 成功获取 ${screenName} 的关注数: ${result.count}`);
+          const response = {
+            success: true,
+            count: result.count,
+            tabId: result.tabId,
+            workerId: workerId,
+          };
+          console.log(`发送工作线程响应到 SidePanel:`, JSON.stringify(response, null, 2));
+          sendResponse(response);
+        })
+        .catch(error => {
+          console.error(`工作线程 ${workerId} 获取关注数时出错:`, error);
+          const errorResponse = {
+            success: false,
+            error: error.message,
+            workerId: workerId,
+          };
+          sendResponse(errorResponse);
+        });
+    } else {
+      // 原有的处理逻辑（向后兼容）
+      getFollowingCountFromTwitter(screenName, operationId, reuseTab || false)
+        .then(count => {
+          console.log(`成功获取 ${screenName} 的关注数: ${count}，准备返回结果`);
+          const response = { success: true, count: count };
+          console.log(`发送响应到 SidePanel:`, JSON.stringify(response, null, 2));
+          sendResponse(response);
+          console.log(`响应已发送完成`);
+        })
+        .catch(error => {
+          console.error('获取关注数时出错:', error);
+          const errorResponse = { success: false, error: error.message };
+          console.log(`发送错误响应到 SidePanel:`, JSON.stringify(errorResponse, null, 2));
+          sendResponse(errorResponse);
+          console.log(`错误响应已发送完成`);
+        });
+    }
 
     // 返回 true 表示我们会异步发送响应
     return true;
@@ -550,7 +623,310 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     return true;
   }
+
+  if (request.action === 'closeWorkerTab') {
+    const { tabId, workerId } = request;
+    closeWorkerTab(tabId, workerId)
+      .then(() => sendResponse({ success: true }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
 });
+
+// 工作线程请求处理函数
+const handleWorkerRequest = async (
+  screenName: string,
+  operationId: string,
+  workerId: string,
+  reuseTab: boolean,
+): Promise<{ count: number; tabId: number }> => {
+  let tabId: number | null = null;
+
+  if (reuseTab && workerTabsMap.has(workerId)) {
+    // 复用工作线程的标签页
+    tabId = workerTabsMap.get(workerId)!;
+    try {
+      // 检查标签页是否还存在
+      await chrome.tabs.get(tabId);
+      // 导航到新用户页面
+      await chrome.tabs.update(tabId, {
+        url: `https://twitter.com/${screenName}`,
+        active: false,
+      });
+      console.log(`工作线程 ${workerId} 复用标签页 ${tabId} 导航到 ${screenName}`);
+    } catch (error) {
+      // 标签页不存在，创建新的
+      console.log(`工作线程 ${workerId} 的标签页 ${tabId} 不存在，将创建新标签页`);
+      tabId = null;
+      workerTabsMap.delete(workerId);
+    }
+  }
+
+  if (!tabId) {
+    // 创建新标签页
+    console.log(`🆕 工作线程 ${workerId} 准备创建新标签页访问 ${screenName}`);
+    const tab = await chrome.tabs.create({
+      url: `https://twitter.com/${screenName}`,
+      active: false,
+    });
+    tabId = tab.id!;
+    workerTabsMap.set(workerId, tabId);
+    console.log(`✅ 工作线程 ${workerId} 成功创建新标签页 ${tabId} 访问 ${screenName}`);
+    console.log(`📊 当前工作线程标签页映射:`, Array.from(workerTabsMap.entries()));
+  }
+
+  // 等待页面加载并提取数据
+  await waitForTabComplete(tabId, operationId);
+
+  // 注入内容脚本并获取关注数
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: tabId },
+    func: () => {
+      const logs: string[] = [];
+      logs.push('工作线程开始在页面中查找关注数...');
+
+      // 检查页面是否已加载
+      if (document.readyState !== 'complete') {
+        logs.push('页面尚未完全加载，可能影响数据提取');
+      }
+
+      // 记录页面状态用于调试
+      logs.push(`页面标题: ${document.title}`);
+      logs.push(`页面URL: ${window.location.href}`);
+      logs.push(`页面加载状态: ${document.readyState}`);
+
+      // 使用简化的提取逻辑
+      const selectors = [
+        '[data-testid="UserFollowing-Count"]',
+        'a[href$="/following"] span',
+        'a[href*="/following"] span',
+      ];
+
+      let result = -1;
+      let foundElements = 0;
+
+      for (const selector of selectors) {
+        logs.push(`尝试选择器: ${selector}`);
+        const elements = Array.from(document.querySelectorAll(selector));
+        foundElements += elements.length;
+
+        logs.push(`找到 ${elements.length} 个元素匹配 ${selector}`);
+
+        for (const el of elements) {
+          const text = el.textContent?.trim();
+          logs.push(`元素内容: "${text}"`);
+
+          if (text) {
+            // 尝试从文本中提取数字，正确处理带逗号的数字格式
+            logs.push(`正在解析文本: "${text}"`);
+
+            // 移除逗号和空格，但先检查原始文本中是否有逗号分隔的数字
+            const originalCommaMatch = text.match(/\d{1,3}(?:,\d{3})+/);
+            if (originalCommaMatch) {
+              // 如果找到了逗号分隔的数字，直接处理
+              const numStr = originalCommaMatch[0].replace(/,/g, '');
+              const num = parseInt(numStr, 10);
+              if (!isNaN(num) && num >= 0) {
+                // 添加年份检查
+                if (num >= 2020 && num <= 2030) {
+                  logs.push(`跳过可能的年份数字: ${num}`);
+                  continue;
+                }
+                logs.push(`从带逗号文本解析出数字: ${num}`);
+                result = num;
+                break;
+              }
+            }
+
+            // 如果没有逗号分隔的数字，尝试其他格式
+            const cleanText = text.replace(/[,\s]/g, '');
+            const numberMatches = cleanText.match(/\d+(?:\.\d+)?/g);
+            if (numberMatches && numberMatches.length > 0) {
+              // 如果有多个数字，选择最可能是关注数的那个
+              for (const numStr of numberMatches) {
+                const num = parseInt(numStr, 10);
+                // 关注数通常不会太小，且排除年份
+                if (num >= 0 && !(num >= 2020 && num <= 2030)) {
+                  logs.push(`从文本 "${text}" 中提取到数字: ${num}`);
+                  result = num;
+                  break;
+                }
+              }
+              // 如果找到了有效数字，退出外层循环
+              if (result !== -1) break;
+            }
+          }
+        }
+
+        if (result !== -1) break;
+      }
+
+      logs.push(`最终结果: ${result}`);
+      return { result, logs, timestamp: Date.now(), elementsFound: foundElements };
+    },
+  });
+
+  if (results && results[0] && results[0].result) {
+    const resultData = results[0].result as {
+      result: number;
+      logs: string[];
+      timestamp: number;
+      elementsFound: number;
+    };
+
+    console.log(`工作线程 ${workerId} 提取过程日志:`, resultData.logs);
+
+    if (resultData.result !== -1) {
+      return { count: resultData.result, tabId: tabId };
+    } else {
+      // 🚨 检测到错误页面，启动错误处理和恢复机制
+      console.log(`🚨 工作线程 ${workerId} 检测到错误页面，启动错误处理机制...`);
+
+      try {
+        // 调用专门的工作线程错误处理函数
+        const recoveredFollowingCount = await handleWorkerErrorAndRecover(tabId, screenName, operationId, workerId);
+
+        if (recoveredFollowingCount !== -1) {
+          console.log(`🎉 工作线程 ${workerId} 错误页面恢复成功，获取到following数: ${recoveredFollowingCount}`);
+          return { count: recoveredFollowingCount, tabId: tabId };
+        } else {
+          console.error(`❌ 工作线程 ${workerId} 错误页面恢复失败`);
+          throw new Error(`工作线程 ${workerId} 错误页面恢复失败`);
+        }
+      } catch (error) {
+        console.error(`❌ 工作线程 ${workerId} 错误处理过程中出错:`, error);
+        throw new Error(`工作线程 ${workerId} 错误处理失败: ${error}`);
+      }
+    }
+  }
+
+  throw new Error(`工作线程 ${workerId} 无法获取关注数据`);
+};
+
+// 新增：工作线程专用的错误处理和恢复机制
+const handleWorkerErrorAndRecover = async (
+  errorTabId: number,
+  screenName: string,
+  operationId: string,
+  workerId: string,
+): Promise<number> => {
+  console.log(`🚨 开始处理工作线程 ${workerId} 的错误页面，标签页ID: ${errorTabId}, 用户: ${screenName}`);
+
+  try {
+    // 1. 清除Twitter站点数据（只影响当前标签页）
+    console.log(`步骤1: 清除工作线程 ${workerId} 的Twitter站点数据...`);
+    await clearTwitterSiteData();
+
+    // 2. 循环检测和重试，直到页面正常
+    console.log(`步骤2: 工作线程 ${workerId} 开始循环检测和重试...`);
+    let maxAttempts = 3; // 减少重试次数，避免影响其他工作线程
+    let attempt = 0;
+    let followingCount = -1;
+
+    while (attempt < maxAttempts && followingCount === -1) {
+      attempt++;
+      console.log(`🔄 工作线程 ${workerId} 第 ${attempt}/${maxAttempts} 次尝试恢复...`);
+
+      try {
+        // 刷新当前错误页面
+        await chrome.tabs.reload(errorTabId);
+        console.log(`🔄 工作线程 ${workerId} 标签页 ${errorTabId} 已刷新`);
+
+        // 等待页面加载
+        await waitForTabComplete(errorTabId, `${operationId}-recovery-${attempt}`);
+
+        // 尝试提取数据
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: errorTabId },
+          func: () => {
+            // 复用原有的数据提取逻辑
+            const logs: string[] = [];
+            const timestamp = Date.now();
+
+            logs.push(`[${new Date(timestamp).toLocaleTimeString()}] 开始提取following数据`);
+
+            // 检查是否是错误页面
+            const bodyText = document.body.innerText.toLowerCase();
+            if (
+              bodyText.includes('出错了') ||
+              bodyText.includes('something went wrong') ||
+              bodyText.includes('try again') ||
+              bodyText.includes('rate limit') ||
+              bodyText.includes('请重试')
+            ) {
+              logs.push('检测到错误页面内容');
+              return { result: -1, logs, timestamp, elementsFound: 0 };
+            }
+
+            // 尝试获取following数
+            const followingLinks = document.querySelectorAll('a[href*="/following"]');
+            logs.push(`找到 ${followingLinks.length} 个following链接`);
+
+            let followingCount = -1;
+            for (const link of followingLinks) {
+              const textContent = link.textContent || '';
+              const match = textContent.match(/^([\d,]+)\s*正在关注|^([\d,]+)\s*Following/i);
+              if (match) {
+                const countStr = (match[1] || match[2]).replace(/,/g, '');
+                followingCount = parseInt(countStr);
+                logs.push(`从链接提取到following数: ${followingCount}`);
+                break;
+              }
+            }
+
+            return {
+              result: followingCount,
+              logs,
+              timestamp,
+              elementsFound: followingLinks.length,
+            };
+          },
+        });
+
+        if (results && results[0] && results[0].result) {
+          const resultData = results[0].result as {
+            result: number;
+            logs: string[];
+            timestamp: number;
+            elementsFound: number;
+          };
+
+          console.log(`工作线程 ${workerId} 第 ${attempt} 次尝试结果:`, resultData.result);
+
+          if (resultData.result !== -1) {
+            followingCount = resultData.result;
+            console.log(`🎉 工作线程 ${workerId} 恢复成功，following数: ${followingCount}`);
+            break;
+          }
+        }
+      } catch (error) {
+        console.error(`工作线程 ${workerId} 第 ${attempt} 次尝试失败:`, error);
+
+        // 短暂等待后继续下一次尝试
+        if (attempt < maxAttempts) {
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+      }
+    }
+
+    return followingCount;
+  } catch (error) {
+    console.error(`工作线程 ${workerId} 错误处理过程中出错:`, error);
+    return -1;
+  }
+};
+
+// 关闭工作线程标签页
+const closeWorkerTab = async (tabId: number, workerId: string): Promise<void> => {
+  try {
+    await chrome.tabs.remove(tabId);
+    workerTabsMap.delete(workerId);
+    console.log(`关闭工作线程 ${workerId} 的标签页 ${tabId}`);
+  } catch (error) {
+    console.warn(`关闭工作线程标签页失败:`, error);
+    throw error;
+  }
+};
 
 // 等待页面元素加载的辅助函数
 function waitForElement(selector: string, timeout: number = 15000): Promise<Element | null> {
@@ -1471,7 +1847,7 @@ const getFollowingCountFromTwitter = async (
 const waitForTabComplete = async (tabId: number, operationId: string): Promise<void> => {
   return new Promise((resolve, reject) => {
     let attempts = 0;
-    const maxAttempts = 15; // 增加到15次尝试
+    const maxAttempts = 5; // 增加到15次尝试
     const timeoutMs = 60000; // 60秒超时
 
     console.log(`开始等待标签页 ${tabId} 加载完成，最多 ${maxAttempts} 次尝试，超时 ${timeoutMs}ms`);
@@ -2430,7 +2806,7 @@ const handleErrorPageAndRecover = async (
 
     // 2. 循环清除缓存并检测，直到页面正常
     console.log('步骤2: 开始循环清除缓存并检测...');
-    let maxAttempts = 5; // 最大尝试次数
+    let maxAttempts = 3; // 最大尝试次数
     let attempt = 0;
     let followingCount = -1;
 
@@ -2761,6 +3137,13 @@ const cleanupOperationData = (operationId: string): void => {
     const closedTabsCount = closedTabsForRecovery.get(operationId)?.length || 0;
     closedTabsForRecovery.delete(operationId);
     console.log(`🗑️ 已清理 ${closedTabsCount} 个缓存的标签页信息`);
+  }
+
+  // 清理工作线程标签页映射（清理所有工作线程）
+  const workerTabsCount = workerTabsMap.size;
+  if (workerTabsCount > 0) {
+    workerTabsMap.clear();
+    console.log(`🗑️ 已清理 ${workerTabsCount} 个工作线程标签页映射`);
   }
 
   // 清理错误恢复状态

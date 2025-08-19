@@ -55,6 +55,487 @@ interface FailedUser {
   timestamp: string;
 }
 
+// 新增：队列处理相关接口
+interface QueueStatus {
+  pending: number;
+  processing: number;
+  completed: number;
+  failed: number;
+  retry: number;
+  total: number;
+}
+
+interface WorkerStatus {
+  total: number;
+  idle: number;
+  busy: number;
+  details: Array<{
+    id: string;
+    isIdle: boolean;
+    currentUser?: string;
+    processingCount: number;
+    hasTab: boolean;
+  }>;
+}
+
+interface ProcessingUser {
+  user: TwitterUser;
+  workerId: string;
+  startTime: number;
+}
+
+interface CompletedUser {
+  user: TwitterUser;
+  workerId: string;
+  startTime: number;
+  result: number;
+  completedTime: number;
+  duration: number;
+}
+
+interface FailedUserInfo {
+  user: TwitterUser;
+  workerId: string;
+  startTime: number;
+  error: string;
+  failedTime: number;
+  duration: number;
+}
+
+// 用户队列管理器
+class UserQueueManager {
+  private pendingQueue: TwitterUser[] = [];
+  private processingMap = new Map<number, ProcessingUser>();
+  private completedList: CompletedUser[] = [];
+  private failedList: FailedUserInfo[] = [];
+  private retryQueue: TwitterUser[] = [];
+  private retryCountMap = new Map<number, number>();
+
+  // 添加用户到队列
+  addUsers(users: TwitterUser[]): number {
+    const newUsers = users.filter(user => !this.isUserInProcessing(user.id) && !this.isUserCompleted(user.id));
+    this.pendingQueue.push(...newUsers);
+    return newUsers.length;
+  }
+
+  // 获取下一个待处理用户
+  getNextUser(): TwitterUser | null {
+    // 优先处理重试队列
+    while (this.retryQueue.length > 0) {
+      const user = this.retryQueue.shift()!;
+      // 检查该用户是否已经在处理中
+      if (!this.isUserInProcessing(user.id) && !this.isUserCompleted(user.id)) {
+        console.log(`🔄 从重试队列获取用户 ${user.screenName}, 剩余重试队列: ${this.retryQueue.length}`);
+        return user;
+      } else {
+        console.log(`⚠️ 跳过重试队列中已处理的用户 ${user.screenName}`);
+      }
+    }
+
+    // 否则从主队列获取
+    while (this.pendingQueue.length > 0) {
+      const user = this.pendingQueue.shift()!;
+      // 检查该用户是否已经在处理中
+      if (!this.isUserInProcessing(user.id) && !this.isUserCompleted(user.id)) {
+        console.log(`📝 从主队列获取用户 ${user.screenName}, 剩余待处理: ${this.pendingQueue.length}`);
+        return user;
+      } else {
+        console.log(`⚠️ 跳过主队列中已处理的用户 ${user.screenName}`);
+      }
+    }
+
+    return null;
+  }
+
+  // 标记用户开始处理
+  markUserProcessing(user: TwitterUser, workerId: string): void {
+    this.processingMap.set(user.id, {
+      user,
+      workerId,
+      startTime: Date.now(),
+    });
+  }
+
+  // 标记用户完成
+  markUserCompleted(userId: number, result: number): void {
+    const processingInfo = this.processingMap.get(userId);
+    if (processingInfo) {
+      this.completedList.push({
+        ...processingInfo,
+        result,
+        completedTime: Date.now(),
+        duration: Date.now() - processingInfo.startTime,
+      });
+      this.processingMap.delete(userId);
+    }
+  }
+
+  // 标记用户失败
+  markUserFailed(userId: number, error: string, shouldRetry: boolean = true): void {
+    const processingInfo = this.processingMap.get(userId);
+    if (processingInfo) {
+      const failedInfo: FailedUserInfo = {
+        ...processingInfo,
+        error,
+        failedTime: Date.now(),
+        duration: Date.now() - processingInfo.startTime,
+      };
+
+      this.failedList.push(failedInfo);
+      this.processingMap.delete(userId);
+
+      // 是否加入重试队列
+      if (shouldRetry && this.getRetryCount(userId) < 3) {
+        const retryCount = this.getRetryCount(userId) + 1;
+        this.retryCountMap.set(userId, retryCount);
+
+        // 检查用户是否已经在重试队列中，避免重复添加
+        const existsInRetryQueue = this.retryQueue.some(u => u.id === userId);
+        if (!existsInRetryQueue) {
+          this.retryQueue.push(processingInfo.user);
+          console.log(`🔄 用户 ${processingInfo.user.screenName} 添加到重试队列 (第${retryCount}次重试)`);
+        } else {
+          console.log(`⚠️ 用户 ${processingInfo.user.screenName} 已在重试队列中，跳过添加`);
+        }
+      }
+    }
+  }
+
+  // 检查用户是否在处理中
+  private isUserInProcessing(userId: number): boolean {
+    return this.processingMap.has(userId);
+  }
+
+  // 检查用户是否已完成
+  private isUserCompleted(userId: number): boolean {
+    return this.completedList.some(item => item.user.id === userId);
+  }
+
+  // 获取重试次数
+  private getRetryCount(userId: number): number {
+    return this.retryCountMap.get(userId) || 0;
+  }
+
+  // 获取队列状态
+  getStatus(): QueueStatus {
+    return {
+      pending: this.pendingQueue.length,
+      processing: this.processingMap.size,
+      completed: this.completedList.length,
+      failed: this.failedList.length,
+      retry: this.retryQueue.length,
+      total:
+        this.pendingQueue.length +
+        this.processingMap.size +
+        this.completedList.length +
+        this.failedList.length +
+        this.retryQueue.length,
+    };
+  }
+
+  // 获取完成的用户列表
+  getCompletedUsers(): CompletedUser[] {
+    return [...this.completedList];
+  }
+
+  // 获取失败的用户列表
+  getFailedUsers(): FailedUserInfo[] {
+    return [...this.failedList];
+  }
+
+  // 清空队列
+  clear(): void {
+    this.pendingQueue = [];
+    this.processingMap.clear();
+    this.completedList = [];
+    this.failedList = [];
+    this.retryQueue = [];
+    this.retryCountMap.clear();
+  }
+
+  // 暂停处理（清空待处理队列，但保留正在处理的）
+  pause(): TwitterUser[] {
+    const pausedUsers = [...this.pendingQueue, ...this.retryQueue];
+    this.pendingQueue = [];
+    this.retryQueue = [];
+    return pausedUsers;
+  }
+
+  // 恢复处理（重新添加暂停的用户）
+  resume(pausedUsers: TwitterUser[]): void {
+    this.pendingQueue.unshift(...pausedUsers);
+  }
+}
+
+// 工作线程池管理器
+class WorkerPoolManager {
+  private maxWorkers: number;
+  private workers = new Map<string, any>();
+  private queueManager: UserQueueManager | null = null;
+  private isRunning = false;
+  private isPaused = false;
+  private pausedUsers: TwitterUser[] = [];
+
+  constructor(maxWorkers: number = 5) {
+    this.maxWorkers = maxWorkers;
+  }
+
+  // 初始化工作池
+  async initialize(queueManager: UserQueueManager, targetWorkers?: number): Promise<void> {
+    this.queueManager = queueManager;
+    this.isRunning = true;
+    this.isPaused = false;
+
+    // 如果指定了目标工作线程数，则更新maxWorkers
+    if (targetWorkers) {
+      this.maxWorkers = targetWorkers;
+    }
+
+    console.log(`🏭 正在创建 ${this.maxWorkers} 个工作线程...`);
+
+    // 创建工作线程
+    for (let i = 0; i < this.maxWorkers; i++) {
+      const workerId = `worker-${i}`;
+      console.log(`🔧 创建工作线程 ${workerId} (${i + 1}/${this.maxWorkers})`);
+      await this.createWorker(workerId);
+    }
+
+    console.log(`✅ 所有 ${this.maxWorkers} 个工作线程创建完成`);
+    console.log(`📊 工作线程列表:`, Array.from(this.workers.keys()));
+  }
+
+  // 创建工作线程
+  private async createWorker(workerId: string): Promise<void> {
+    const worker = {
+      id: workerId,
+      operationId: `${Date.now()}-${workerId}`,
+      isIdle: true,
+      currentUser: null as TwitterUser | null,
+      tabId: null as number | null,
+      lastActivity: Date.now(),
+      processingCount: 0,
+    };
+
+    this.workers.set(workerId, worker);
+    console.log(`✅ 工作线程 ${workerId} 已创建并注册`);
+
+    // 🚀 启动工作循环，添加小的随机延迟避免同时启动
+    const startDelay = Math.random() * 2000; // 0-2秒的随机延迟
+    console.log(`⏰ 工作线程 ${workerId} 将在 ${Math.round(startDelay)}ms 后启动工作循环`);
+    setTimeout(() => {
+      this.startWorkerLoop(workerId);
+    }, startDelay);
+  }
+
+  // 工作线程主循环
+  private async startWorkerLoop(workerId: string): Promise<void> {
+    const worker = this.workers.get(workerId);
+    if (!worker || !this.queueManager) {
+      console.error(`❌ 工作线程 ${workerId} 启动失败: worker或queueManager不存在`);
+      return;
+    }
+
+    console.log(`🚀 工作线程 ${workerId} 开始工作循环`);
+
+    while (this.isRunning) {
+      try {
+        // 检查是否暂停
+        if (this.isPaused) {
+          worker.isIdle = true;
+          worker.currentUser = null;
+          await this.sleep(1000);
+          continue;
+        }
+
+        // 获取下一个用户
+        const user = this.queueManager.getNextUser();
+        if (!user) {
+          // 没有用户，休眠一段时间
+          worker.isIdle = true;
+          worker.currentUser = null;
+          await this.sleep(1000);
+          continue;
+        }
+
+        // 处理用户
+        worker.isIdle = false;
+        worker.currentUser = user;
+        worker.lastActivity = Date.now();
+
+        console.log(`🔥 工作线程 ${workerId} 开始处理用户 ${user.screenName} (ID: ${user.id})`);
+        this.queueManager.markUserProcessing(user, workerId);
+
+        try {
+          const result = await this.processUser(user, worker);
+          console.log(`✅ 工作线程 ${workerId} 成功处理用户 ${user.screenName}, 结果: ${result}`);
+          this.queueManager.markUserCompleted(user.id, result);
+          worker.processingCount++;
+
+          // 可选：每处理一定数量用户后重启标签页
+          if (worker.processingCount % 20 === 0) {
+            await this.refreshWorkerTab(workerId);
+          }
+        } catch (error) {
+          console.error(`❌ 工作线程 ${workerId} 处理用户 ${user.screenName} 失败:`, error);
+
+          // 检查是否是特定的错误，决定是否重试
+          const errorMessage = error instanceof Error ? error.message : '未知错误';
+          const shouldRetry = !errorMessage.includes('错误页面恢复失败') && !errorMessage.includes('无法获取关注数据');
+
+          this.queueManager.markUserFailed(
+            user.id,
+            errorMessage,
+            shouldRetry, // 根据错误类型决定是否重试
+          );
+        }
+      } catch (error) {
+        console.error(`工作线程 ${workerId} 出错:`, error);
+        // 错误后短暂休眠
+        await this.sleep(2000);
+      }
+
+      // 处理间隔（增加随机延迟，避免所有工作线程同时请求）
+      const baseDelay = 500;
+      const randomDelay = Math.random() * 1000; // 0-1秒的随机延迟
+      await this.sleep(baseDelay + randomDelay);
+    }
+  }
+
+  // 处理单个用户
+  private async processUser(user: TwitterUser, worker: any): Promise<number> {
+    const { screenName } = user;
+
+    console.log(
+      `📞 工作线程 ${worker.id} 发送请求处理用户 ${screenName}, tabId: ${worker.tabId}, reuseTab: ${worker.tabId ? true : false}`,
+    );
+
+    // 发送消息到 background script
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(
+        {
+          action: 'getFollowingCount',
+          screenName: screenName,
+          operationId: worker.operationId,
+          reuseTab: worker.tabId ? true : false, // 有标签页就复用
+          workerId: worker.id,
+        },
+        response => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+          } else if (response && response.success) {
+            // 更新工作线程的标签页ID
+            if (response.tabId) {
+              worker.tabId = response.tabId;
+            }
+            const count = typeof response.count === 'number' ? response.count : parseInt(response.count, 10);
+            if (isNaN(count)) {
+              reject(new Error('返回的关注数不是有效数字'));
+            } else {
+              resolve(count);
+            }
+          } else {
+            reject(new Error(response?.error || '获取关注数失败'));
+          }
+        },
+      );
+    });
+  }
+
+  // 刷新工作线程标签页
+  private async refreshWorkerTab(workerId: string): Promise<void> {
+    const worker = this.workers.get(workerId);
+    if (worker && worker.tabId) {
+      try {
+        // 关闭旧标签页
+        await new Promise<void>((resolve, reject) => {
+          chrome.runtime.sendMessage(
+            {
+              action: 'closeWorkerTab',
+              tabId: worker.tabId,
+              workerId: workerId,
+            },
+            response => {
+              if (chrome.runtime.lastError) {
+                reject(new Error(chrome.runtime.lastError.message));
+              } else {
+                resolve();
+              }
+            },
+          );
+        });
+
+        worker.tabId = null;
+        console.log(`🔄 工作线程 ${workerId} 标签页已刷新`);
+      } catch (error) {
+        console.warn(`刷新工作线程 ${workerId} 标签页失败:`, error);
+      }
+    }
+  }
+
+  // 获取工作池状态
+  getWorkerStatus(): WorkerStatus {
+    const workers = Array.from(this.workers.values());
+    return {
+      total: workers.length,
+      idle: workers.filter(w => w.isIdle).length,
+      busy: workers.filter(w => !w.isIdle).length,
+      details: workers.map(w => ({
+        id: w.id,
+        isIdle: w.isIdle,
+        currentUser: w.currentUser?.screenName,
+        processingCount: w.processingCount,
+        hasTab: !!w.tabId,
+      })),
+    };
+  }
+
+  // 暂停所有工作线程
+  pause(): void {
+    this.isPaused = true;
+    if (this.queueManager) {
+      this.pausedUsers = this.queueManager.pause();
+    }
+  }
+
+  // 恢复所有工作线程
+  resume(): void {
+    this.isPaused = false;
+    if (this.queueManager && this.pausedUsers.length > 0) {
+      this.queueManager.resume(this.pausedUsers);
+      this.pausedUsers = [];
+    }
+  }
+
+  // 停止所有工作线程
+  async stop(): Promise<void> {
+    this.isRunning = false;
+    this.isPaused = false;
+
+    // 关闭所有工作线程的标签页
+    const closePromises = Array.from(this.workers.values()).map(worker => {
+      if (worker.tabId) {
+        return this.refreshWorkerTab(worker.id).catch(console.warn);
+      }
+      return Promise.resolve();
+    });
+
+    await Promise.all(closePromises);
+    this.workers.clear();
+  }
+
+  // 睡眠函数
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  // 检查是否所有工作完成
+  isAllCompleted(): boolean {
+    if (!this.queueManager) return false;
+    const status = this.queueManager.getStatus();
+    return status.pending === 0 && status.processing === 0;
+  }
+}
+
 const SidePanel = () => {
   const { isLight } = useStorage(exampleThemeStorage);
   const [isLoading, setIsLoading] = useState(false);
@@ -81,6 +562,26 @@ const SidePanel = () => {
     changed: 0,
     skipped: 0,
   });
+
+  // 新增：可配置的工作线程数量
+  const [maxWorkers, setMaxWorkers] = useState(10); // 默认5个，可配置
+  const [queueManager] = useState(() => new UserQueueManager());
+  const [workerPool] = useState(() => new WorkerPoolManager(5)); // 初始5个，会根据maxWorkers动态调整
+  const [queueStatus, setQueueStatus] = useState<QueueStatus>({
+    pending: 0,
+    processing: 0,
+    completed: 0,
+    failed: 0,
+    retry: 0,
+    total: 0,
+  });
+  const [workerStatus, setWorkerStatus] = useState<WorkerStatus>({
+    total: 0,
+    idle: 0,
+    busy: 0,
+    details: [],
+  });
+  const [isProcessing, setIsProcessing] = useState(false);
 
   // 新增：代理配置相关状态
   const [proxyUrl, setProxyUrl] = useState<string>('http://127.0.0.1:9090/proxies/辣条');
@@ -692,6 +1193,197 @@ const SidePanel = () => {
         },
       );
     });
+  };
+
+  // 新增：队列式用户处理函数
+  const processUsersWithQueue = async (users: TwitterUser[]) => {
+    try {
+      setIsProcessing(true);
+      setIsLoading(true);
+
+      // 清空队列管理器
+      queueManager.clear();
+
+      // 添加用户到队列
+      const addedCount = queueManager.addUsers(users);
+      console.log(`📝 添加 ${addedCount} 个用户到处理队列`);
+
+      if (addedCount === 0) {
+        setProgress('没有新用户需要处理');
+        setIsProcessing(false);
+        setIsLoading(false);
+        return;
+      }
+
+      // 生成操作ID
+      const operationId = generateOperationId();
+      operationIdRef.current = operationId;
+
+      // 更新统计信息
+      updateStats(false, { total: addedCount });
+
+      // 🔄 先初始化工作池，使用当前配置的线程数
+      console.log(`🚀 正在初始化 ${maxWorkers} 个工作线程...`);
+      await workerPool.initialize(queueManager, maxWorkers);
+
+      // 等待一小段时间确保所有工作线程都已启动
+      await new Promise(resolve => setTimeout(resolve, 500));
+      console.log(
+        `📋 队列状态: pending=${queueManager.getStatus().pending}, 工作线程状态:`,
+        workerPool.getWorkerStatus(),
+      );
+
+      // 启动进度监控
+      const progressInterval = setInterval(() => {
+        const currentQueueStatus = queueManager.getStatus();
+        const currentWorkerStatus = workerPool.getWorkerStatus();
+
+        setQueueStatus(currentQueueStatus);
+        setWorkerStatus(currentWorkerStatus);
+
+        // 更新进度显示
+        const totalProcessed = currentQueueStatus.completed + currentQueueStatus.failed;
+        setProgress(
+          `处理中: ${currentQueueStatus.processing} | 已完成: ${currentQueueStatus.completed} | 失败: ${currentQueueStatus.failed} | 待处理: ${currentQueueStatus.pending} | 重试: ${currentQueueStatus.retry}`,
+        );
+
+        // 更新统计数据
+        updateStats(false, {
+          processed: totalProcessed,
+          successful: currentQueueStatus.completed,
+          failed: currentQueueStatus.failed,
+        });
+
+        // 检查是否全部完成
+        if (workerPool.isAllCompleted()) {
+          clearInterval(progressInterval);
+          handleQueueProcessingComplete(currentQueueStatus);
+        }
+      }, 1000);
+    } catch (error) {
+      console.error('队列处理出错:', error);
+      setIsProcessing(false);
+      setIsLoading(false);
+      setProgress(`处理出错: ${error instanceof Error ? error.message : '未知错误'}`);
+    }
+  };
+
+  // 处理队列完成
+  const handleQueueProcessingComplete = (finalStatus: QueueStatus) => {
+    setIsProcessing(false);
+    setIsLoading(false);
+
+    console.log(`🎉 队列处理完成! 成功: ${finalStatus.completed}, 失败: ${finalStatus.failed}`);
+    setProgress(`✅ 处理完成! 成功: ${finalStatus.completed}, 失败: ${finalStatus.failed}`);
+
+    // 处理完成的用户 - 更新数据库
+    const completedUsers = queueManager.getCompletedUsers();
+    const failedUserInfos = queueManager.getFailedUsers();
+
+    // 处理成功的用户，调用updateUser API
+    completedUsers.forEach(async completedUser => {
+      try {
+        const { user, result } = completedUser;
+        const newAdditions = result - user.followingCount;
+
+        if (newAdditions !== 0) {
+          console.log(`📞 更新用户 ${user.screenName}: ${user.followingCount} -> ${result} (变化: ${newAdditions})`);
+          await updateUser(user.id, result, newAdditions);
+
+          // 添加到新用户列表
+          if (newAdditions > 0) {
+            setNewUsers(prev => [...prev, `${user.screenName} (+${newAdditions})`]);
+            incrementStats(false, { changed: 1 });
+          }
+        } else {
+          console.log(`用户 ${user.screenName} 关注数无变化: ${result}`);
+          incrementStats(false, { skipped: 1 });
+        }
+      } catch (error) {
+        console.error(`更新用户 ${completedUser.user.screenName} 失败:`, error);
+      }
+    });
+
+    // 处理失败的用户，添加到失败列表
+    failedUserInfos.forEach(failedUserInfo => {
+      saveFailedUser(failedUserInfo.user, failedUserInfo.error);
+    });
+
+    // 清理操作状态
+    operationIdRef.current = null;
+    setCurrentUser(null);
+  };
+
+  // 暂停队列处理
+  const pauseQueueProcessing = async () => {
+    try {
+      workerPool.pause();
+      setIsPaused(true);
+      setProgress('队列处理已暂停');
+
+      // 同时暂停background的操作
+      if (operationIdRef.current) {
+        await pauseOperation();
+      }
+    } catch (error) {
+      console.error('暂停队列处理失败:', error);
+    }
+  };
+
+  // 恢复队列处理
+  const resumeQueueProcessing = async () => {
+    try {
+      workerPool.resume();
+      setIsPaused(false);
+      setProgress('队列处理已恢复');
+
+      // 同时恢复background的操作
+      if (operationIdRef.current) {
+        await resumeOperation();
+      }
+    } catch (error) {
+      console.error('恢复队列处理失败:', error);
+    }
+  };
+
+  // 停止队列处理
+  const stopQueueProcessing = async () => {
+    try {
+      setIsLoading(true);
+      setProgress('正在停止队列处理...');
+
+      await workerPool.stop();
+      queueManager.clear();
+
+      setIsProcessing(false);
+      setIsLoading(false);
+      setIsPaused(false);
+      setProgress('队列处理已停止');
+
+      // 清理状态
+      setQueueStatus({
+        pending: 0,
+        processing: 0,
+        completed: 0,
+        failed: 0,
+        retry: 0,
+        total: 0,
+      });
+      setWorkerStatus({
+        total: 0,
+        idle: 0,
+        busy: 0,
+        details: [],
+      });
+
+      // 同时停止background的操作
+      if (operationIdRef.current) {
+        await stopOperation();
+      }
+    } catch (error) {
+      console.error('停止队列处理失败:', error);
+      setIsLoading(false);
+    }
   };
 
   const saveFailedUser = (user: TwitterUser, error: string) => {
@@ -1690,10 +2382,8 @@ const SidePanel = () => {
           `目标处理 ${targetNumber} 个用户，API总共有 ${apiTotal} 个用户，实际处理 ${actualTotal} 个用户，分 ${totalPages} 组处理`,
         );
 
-        const allNewUsers: string[] = [];
-
-        const groupPromises: Promise<string[]>[] = [];
-        const groupStats: { page: number; users: number }[] = [];
+        // 🔄 新队列处理逻辑：收集所有用户到队列
+        const allUsers: TwitterUser[] = [];
         let processedCount = 0;
 
         for (let page = 1; page <= totalPages && !shouldStopRef.current && processedCount < actualTotal; page++) {
@@ -1711,54 +2401,36 @@ const SidePanel = () => {
               users = users.slice(0, remainingCount);
             }
 
-            console.log(
-              `第 ${pageNum} 组有 ${users.length} 个用户（原始 ${pageData.data.list.length} 个，限制后 ${users.length} 个）`,
-            );
-            groupStats.push({ page: pageNum, users: users.length });
+            console.log(`第 ${pageNum} 页: 获取到 ${pageData.data.list.length} 个用户，收集 ${users.length} 个用户`);
+
+            allUsers.push(...users);
             processedCount += users.length;
 
+            // 🚀 新版本：不在这里处理用户，只收集到allUsers中，稍后统一用队列处理
             if (users.length > 0) {
-              console.log(`开始处理第 ${pageNum} 组的 ${users.length} 个用户...`);
-              const groupOperationId = `${operationIdRef.current}-group-${pageNum}`;
-              console.log(`第 ${pageNum} 组使用操作ID: ${groupOperationId}，基础操作ID: ${baseOperationIdRef.current}`);
-              // 在连续监听模式的新轮次中，允许第一个用户复用标签页
-              const shouldReuseTabForFirstUser = isContinuousMode && isNewRound;
-              console.log(
-                `第 ${pageNum} 组标签页复用判断: isContinuousMode=${isContinuousMode}, isNewRound=${isNewRound}, shouldReuseTabForFirstUser=${shouldReuseTabForFirstUser}`,
-              );
-              const newUsersInGroup = await processUserGroup(users, groupOperationId, shouldReuseTabForFirstUser);
-              console.log(`第 ${pageNum} 组处理完成，发现 ${newUsersInGroup.length} 个用户关注数有变化`);
-              return newUsersInGroup;
+              console.log(`第 ${pageNum} 页: 收集了 ${users.length} 个用户，添加到队列等待处理...`);
+              // 移除老的组处理逻辑，改为只收集数据
+              // const groupOperationId = `${operationIdRef.current}-group-${pageNum}`;
+              // const newUsersInGroup = await processUserGroup(users, groupOperationId, shouldReuseTabForFirstUser);
+              return []; // 暂时返回空数组，实际处理由队列系统完成
             }
 
             return [];
           };
 
-          groupPromises.push(processGroup(page));
-
-          if (page < totalPages && !shouldStopRef.current && processedCount < actualTotal) {
-            await new Promise(resolve => setTimeout(resolve, 2000));
-          }
+          // 只是收集用户数据，不进行处理
+          await processGroup(page);
         }
 
-        console.log(`等待 ${groupPromises.length} 个分组并行处理完成...`);
-        setProgress(prev => `${prev}\n${roundText}等待 ${groupPromises.length} 个分组并行处理完成...`);
+        console.log(`🎯 用户收集完成，共收集到 ${allUsers.length} 个用户，开始队列处理...`);
+        setProgress(`${roundText}用户收集完成，共 ${allUsers.length} 个用户，开始队列处理...`);
 
-        const results = await Promise.all(groupPromises);
+        // 使用新的队列处理函数
+        await processUsersWithQueue(allUsers);
 
-        results.forEach(groupResult => {
-          allNewUsers.push(...groupResult);
-        });
-
-        console.log(`所有分组处理完成，分组情况: ${JSON.stringify(groupStats)}`);
-
-        if (allNewUsers.length > 0) {
-          console.log(`共发现 ${allNewUsers.length} 个用户关注数有变化，保存到本地存储`);
-          const existingUsers = JSON.parse(localStorage.getItem('newTwitterUsers') || '[]');
-          const updatedUsers = [...allNewUsers, ...existingUsers];
-          localStorage.setItem('newTwitterUsers', JSON.stringify(updatedUsers));
-          setNewUsers(updatedUsers);
-        }
+        console.log('✅ 队列处理完成');
+        const finalStats = statsRef.current;
+        console.log('最终统计数据:', finalStats);
 
         // 正常用户处理完成后，开始处理失败用户
         if (!shouldStopRef.current) {
@@ -2617,6 +3289,30 @@ const SidePanel = () => {
                   )}
                 </div>
               )}
+
+              <div className="mt-4 border-t border-gray-300 pt-4">
+                <div className="mb-4">
+                  <label className="mb-2 block text-sm font-medium text-gray-700">🔧 并发工作线程数量：</label>
+                  <div className="flex items-center space-x-2">
+                    <input
+                      type="number"
+                      min="1"
+                      max="20"
+                      value={maxWorkers}
+                      onChange={e => {
+                        const value = parseInt(e.target.value) || 1;
+                        setMaxWorkers(Math.max(1, Math.min(20, value)));
+                      }}
+                      className="w-20 rounded border border-gray-300 px-2 py-1 text-center"
+                      disabled={isProcessing}
+                    />
+                    <span className="text-sm text-gray-600">个线程（推荐：5-10个）</span>
+                  </div>
+                  <p className="mt-1 text-xs text-gray-500">
+                    💡 更多线程 = 更快处理，但消耗更多内存。建议根据电脑性能调整。
+                  </p>
+                </div>
+              </div>
             </div>
           )}
 
@@ -2646,7 +3342,53 @@ const SidePanel = () => {
                 <div>无变化: {stats.skipped}</div>
                 <div>有变化: {stats.changed}</div>
                 <div>进度: {stats.total > 0 ? Math.round((stats.processed / stats.total) * 100) : 0}%</div>
-                <div>模式: {isRetrying ? '重试模式' : isLoading ? '处理中' : '已完成'}</div>
+                <div>
+                  模式: {isRetrying ? '重试模式' : isProcessing ? '队列处理中' : isLoading ? '处理中' : '已完成'}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 新增：队列状态显示 */}
+          {isProcessing && (
+            <div
+              className={cn(
+                'mb-4 rounded-lg border p-3 text-sm',
+                isLight ? 'border-blue-200 bg-blue-50' : 'border-blue-700 bg-blue-900/30',
+              )}>
+              <div className="mb-2 font-semibold">📋 队列处理状态</div>
+              <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+                <div>队列总数: {queueStatus.total}</div>
+                <div>待处理: {queueStatus.pending}</div>
+                <div>处理中: {queueStatus.processing}</div>
+                <div>已完成: {queueStatus.completed}</div>
+                <div>失败: {queueStatus.failed}</div>
+                <div>重试: {queueStatus.retry}</div>
+                <div>
+                  工作线程: {workerStatus.busy}/{workerStatus.total}
+                </div>
+                <div>空闲线程: {workerStatus.idle}</div>
+              </div>
+            </div>
+          )}
+
+          {/* 工作线程详情显示 */}
+          {isProcessing && workerStatus.details.length > 0 && (
+            <div
+              className={cn(
+                'mb-4 rounded-lg border p-3 text-sm',
+                isLight ? 'border-green-200 bg-green-50' : 'border-green-700 bg-green-900/30',
+              )}>
+              <div className="mb-2 font-semibold">🔧 工作线程状态</div>
+              <div className="space-y-1 text-xs">
+                {workerStatus.details.map(worker => (
+                  <div key={worker.id} className="flex justify-between">
+                    <span>{worker.id}:</span>
+                    <span className={worker.isIdle ? 'text-gray-500' : 'text-green-600'}>
+                      {worker.isIdle ? '空闲' : `处理中 (${worker.currentUser || '未知用户'})`}
+                    </span>
+                  </div>
+                ))}
               </div>
             </div>
           )}
@@ -2723,7 +3465,7 @@ const SidePanel = () => {
 
           <div className="space-y-4">
             <div className="flex gap-2">
-              {!isLoading && !isRetrying ? (
+              {!isLoading && !isRetrying && !isProcessing ? (
                 (() => {
                   const isButtonDisabled =
                     !targetCount.trim() ||
@@ -2791,6 +3533,8 @@ const SidePanel = () => {
                           isContinuousMode,
                           roundInterval: roundInterval.trim(),
                         });
+                        // 立即设置处理状态，确保按钮切换
+                        setIsProcessing(true);
                         updateFollowingCounts(false);
                       }}
                       disabled={isButtonDisabled}
@@ -2812,7 +3556,7 @@ const SidePanel = () => {
                 <>
                   {!isPaused ? (
                     <button
-                      onClick={pauseOperation}
+                      onClick={isProcessing ? pauseQueueProcessing : pauseOperation}
                       className={cn(
                         'flex-1 rounded-lg px-4 py-3 font-bold shadow-lg transition-all duration-200',
                         isLight
@@ -2823,7 +3567,7 @@ const SidePanel = () => {
                     </button>
                   ) : (
                     <button
-                      onClick={resumeOperation}
+                      onClick={isProcessing ? resumeQueueProcessing : resumeOperation}
                       className={cn(
                         'flex-1 rounded-lg px-4 py-3 font-bold shadow-lg transition-all duration-200',
                         isLight
@@ -2834,7 +3578,7 @@ const SidePanel = () => {
                     </button>
                   )}
                   <button
-                    onClick={stopOperation}
+                    onClick={isProcessing ? stopQueueProcessing : stopOperation}
                     className={cn(
                       'rounded-lg px-4 py-3 font-bold shadow-lg transition-all duration-200',
                       isLight ? 'bg-red-500 text-white hover:bg-red-600' : 'bg-red-600 text-white hover:bg-red-700',
@@ -2985,8 +3729,20 @@ const SidePanel = () => {
                       ? 'bg-orange-500 text-white hover:bg-orange-600 hover:shadow-md'
                       : 'bg-orange-600 text-white hover:bg-orange-700 hover:shadow-md',
                   )}>
-                  🗂️ 关闭标签页
+                  🗂️ 关闭所有标签页
                 </button>
+              </div>
+            )}
+
+            {/* 新增：队列处理完成后的提示 */}
+            {!isProcessing && queueStatus.total > 0 && (
+              <div
+                className={cn(
+                  'mt-2 rounded-lg border p-2 text-xs',
+                  isLight ? 'border-blue-200 bg-blue-50 text-blue-700' : 'border-blue-700 bg-blue-900/30 text-blue-300',
+                )}>
+                💡
+                队列处理已完成！如需关闭工作线程标签页，请点击"关闭所有标签页"按钮。新版本支持同时关闭传统标签页和工作线程标签页。
               </div>
             )}
 
