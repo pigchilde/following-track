@@ -167,6 +167,19 @@ class UserQueueManager {
         duration: Date.now() - processingInfo.startTime,
       });
       this.processingMap.delete(userId);
+
+      // 🔄 如果该用户之前失败过，现在成功了，需要从失败列表中移除
+      const failedIndex = this.failedList.findIndex(failed => failed.user.id === userId);
+      if (failedIndex !== -1) {
+        const removedFailed = this.failedList.splice(failedIndex, 1)[0];
+        console.log(`✅ 用户 ${removedFailed.user.screenName} 重试成功，已从失败列表中移除`);
+      }
+
+      // 清理重试计数
+      if (this.retryCountMap.has(userId)) {
+        this.retryCountMap.delete(userId);
+        console.log(`🧹 清理用户 ${processingInfo.user.screenName} 的重试计数`);
+      }
     }
   }
 
@@ -218,18 +231,22 @@ class UserQueueManager {
 
   // 获取队列状态
   getStatus(): QueueStatus {
+    // 🔄 修复：使用Set来去重，避免重复计算同一用户
+    const allUserIds = new Set<number>();
+
+    // 统计各队列中的唯一用户
+    this.pendingQueue.forEach(user => allUserIds.add(user.id));
+    this.processingMap.forEach(info => allUserIds.add(info.user.id));
+    this.completedList.forEach(info => allUserIds.add(info.user.id));
+    this.retryQueue.forEach(user => allUserIds.add(user.id));
+
     return {
       pending: this.pendingQueue.length,
       processing: this.processingMap.size,
       completed: this.completedList.length,
       failed: this.failedList.length,
       retry: this.retryQueue.length,
-      total:
-        this.pendingQueue.length +
-        this.processingMap.size +
-        this.completedList.length +
-        this.failedList.length +
-        this.retryQueue.length,
+      total: allUserIds.size, // 🔄 使用唯一用户数作为总数，避免重复计算
     };
   }
 
@@ -241,6 +258,20 @@ class UserQueueManager {
   // 获取失败的用户列表
   getFailedUsers(): FailedUserInfo[] {
     return [...this.failedList];
+  }
+
+  // 🔄 新增：获取实际的统计数据（考虑重试成功的情况）
+  getRealStats(): { actualSuccessful: number; actualFailed: number } {
+    // 计算真正成功的用户数（包括重试成功的）
+    const actualSuccessful = this.completedList.length;
+
+    // 计算真正失败的用户数（只统计最终失败的，不包括已重试成功的）
+    const actualFailed = this.failedList.length;
+
+    return {
+      actualSuccessful,
+      actualFailed,
+    };
   }
 
   // 清空队列
@@ -293,15 +324,31 @@ class WorkerPoolManager {
 
     console.log(`🏭 正在创建 ${this.maxWorkers} 个工作线程...`);
 
-    // 创建工作线程
+    // 🔄 串行创建工作线程，避免并发创建可能导致的问题
+    const creationPromises: Promise<void>[] = [];
     for (let i = 0; i < this.maxWorkers; i++) {
       const workerId = `worker-${i}`;
       console.log(`🔧 创建工作线程 ${workerId} (${i + 1}/${this.maxWorkers})`);
-      await this.createWorker(workerId);
+
+      // 添加小的延迟来避免创建过程中的竞争
+      if (i > 0) {
+        await new Promise(resolve => setTimeout(resolve, 100)); // 每个工作线程之间间隔100ms
+      }
+
+      creationPromises.push(this.createWorker(workerId));
     }
+
+    // 等待所有工作线程创建完成
+    await Promise.all(creationPromises);
 
     console.log(`✅ 所有 ${this.maxWorkers} 个工作线程创建完成`);
     console.log(`📊 工作线程列表:`, Array.from(this.workers.keys()));
+
+    // 🔍 验证所有工作线程是否成功创建
+    const actualWorkerCount = this.workers.size;
+    if (actualWorkerCount !== this.maxWorkers) {
+      console.warn(`⚠️ 期望创建 ${this.maxWorkers} 个工作线程，但实际只创建了 ${actualWorkerCount} 个`);
+    }
   }
 
   // 创建工作线程
@@ -319,11 +366,13 @@ class WorkerPoolManager {
     this.workers.set(workerId, worker);
     console.log(`✅ 工作线程 ${workerId} 已创建并注册`);
 
-    // 🚀 启动工作循环，添加小的随机延迟避免同时启动
-    const startDelay = Math.random() * 2000; // 0-2秒的随机延迟
+    // 🚀 启动工作循环，添加较小的随机延迟避免同时启动，但确保快速启动
+    const startDelay = Math.random() * 500; // 减少到0-0.5秒的随机延迟，加快启动速度
     console.log(`⏰ 工作线程 ${workerId} 将在 ${Math.round(startDelay)}ms 后启动工作循环`);
     setTimeout(() => {
-      this.startWorkerLoop(workerId);
+      this.startWorkerLoop(workerId).catch(error => {
+        console.error(`❌ 工作线程 ${workerId} 启动失败:`, error);
+      });
     }, startDelay);
   }
 
@@ -409,8 +458,18 @@ class WorkerPoolManager {
       `📞 工作线程 ${worker.id} 发送请求处理用户 ${screenName}, tabId: ${worker.tabId}, reuseTab: ${worker.tabId ? true : false}`,
     );
 
+    // 🔄 为新创建的工作线程添加额外的延迟，让它们有更多时间准备
+    if (worker.processingCount === 0 && !worker.tabId) {
+      console.log(`⏰ 工作线程 ${worker.id} 首次处理用户，等待额外时间确保准备就绪...`);
+      await new Promise(resolve => setTimeout(resolve, 1000)); // 首次处理前额外等待1秒
+    }
+
     // 发送消息到 background script
     return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error(`工作线程 ${worker.id} 处理用户 ${screenName} 超时`));
+      }, 30000); // 30秒超时
+
       chrome.runtime.sendMessage(
         {
           action: 'getFollowingCount',
@@ -420,8 +479,10 @@ class WorkerPoolManager {
           workerId: worker.id,
         },
         response => {
+          clearTimeout(timeout);
+
           if (chrome.runtime.lastError) {
-            reject(new Error(chrome.runtime.lastError.message));
+            reject(new Error(`Chrome运行时错误: ${chrome.runtime.lastError.message}`));
           } else if (response && response.success) {
             // 更新工作线程的标签页ID
             if (response.tabId) {
@@ -434,7 +495,9 @@ class WorkerPoolManager {
               resolve(count);
             }
           } else {
-            reject(new Error(response?.error || '获取关注数失败'));
+            const errorMsg = response?.error || '获取关注数失败';
+            console.error(`❌ 工作线程 ${worker.id} 处理用户 ${screenName} 失败: ${errorMsg}`);
+            reject(new Error(errorMsg));
           }
         },
       );
@@ -1255,12 +1318,22 @@ const SidePanel = () => {
       console.log(`🚀 正在初始化 ${maxWorkers} 个工作线程...`);
       await workerPool.initialize(queueManager, maxWorkers);
 
-      // 等待一小段时间确保所有工作线程都已启动
-      await new Promise(resolve => setTimeout(resolve, 500));
+      // 🚀 等待足够的时间确保所有工作线程都完全启动和准备就绪
+      console.log('⏰ 等待所有工作线程完全启动...');
+      await new Promise(resolve => setTimeout(resolve, 3000)); // 增加到3秒，确保随机延迟的工作线程都启动完成
+
       console.log(
         `📋 队列状态: pending=${queueManager.getStatus().pending}, 工作线程状态:`,
         workerPool.getWorkerStatus(),
       );
+
+      // 🔍 验证工作线程是否都已准备就绪
+      const workerStatus = workerPool.getWorkerStatus();
+      if (workerStatus.total < maxWorkers) {
+        console.warn(`⚠️ 只有 ${workerStatus.total}/${maxWorkers} 个工作线程已创建，可能影响处理效率`);
+      } else {
+        console.log(`✅ 所有 ${maxWorkers} 个工作线程已准备就绪`);
+      }
 
       // 启动进度监控
       const progressInterval = setInterval(() => {
@@ -1270,18 +1343,21 @@ const SidePanel = () => {
         setQueueStatus(currentQueueStatus);
         setWorkerStatus(currentWorkerStatus);
 
+        // 🔄 获取实际统计数据（考虑重试成功的情况）
+        const realStats = queueManager.getRealStats();
+        const totalProcessed = realStats.actualSuccessful + realStats.actualFailed;
+
         // 更新进度显示
-        const totalProcessed = currentQueueStatus.completed + currentQueueStatus.failed;
         setProgress(
-          `处理中: ${currentQueueStatus.processing} | 已完成: ${currentQueueStatus.completed} | 失败: ${currentQueueStatus.failed} | 待处理: ${currentQueueStatus.pending} | 重试: ${currentQueueStatus.retry}`,
+          `处理中: ${currentQueueStatus.processing} | 已完成: ${realStats.actualSuccessful} | 失败: ${realStats.actualFailed} | 待处理: ${currentQueueStatus.pending} | 重试: ${currentQueueStatus.retry}`,
         );
 
-        // 更新统计数据（使用队列状态，避免重复计数）
+        // 🔄 更新统计数据（使用实际统计数据，正确反映重试成功的情况）
         updateStats(false, {
           total: currentQueueStatus.total,
           processed: totalProcessed,
-          successful: currentQueueStatus.completed,
-          failed: currentQueueStatus.failed,
+          successful: realStats.actualSuccessful,
+          failed: realStats.actualFailed,
           changed: stats.changed, // 保持已计算的变化数
           skipped: stats.skipped, // 保持已计算的跳过数
         });
@@ -1311,23 +1387,28 @@ const SidePanel = () => {
     const durationText = formatDuration(duration);
     setRoundDuration(durationText);
 
-    console.log(`🎉 队列处理完成! 成功: ${finalStatus.completed}, 失败: ${finalStatus.failed}`);
+    // 🔄 获取实际统计数据（考虑重试成功的情况）
+    const realStats = queueManager.getRealStats();
+
+    console.log(`🎉 队列处理完成! 实际成功: ${realStats.actualSuccessful}, 实际失败: ${realStats.actualFailed}`);
     console.log(
       `⏱️ 本轮处理耗时: ${durationText} (开始时间: ${roundStartTimeRef.current}, 结束时间: ${endTime}, 时长: ${duration}ms)`,
     );
 
-    setProgress(`✅ 处理完成! 成功: ${finalStatus.completed}, 失败: ${finalStatus.failed} | ⏱️ 耗时: ${durationText}`);
+    setProgress(
+      `✅ 处理完成! 成功: ${realStats.actualSuccessful}, 失败: ${realStats.actualFailed} | ⏱️ 耗时: ${durationText}`,
+    );
 
     // 处理完成的用户 - 更新数据库
     const completedUsers = queueManager.getCompletedUsers();
     const failedUserInfos = queueManager.getFailedUsers();
 
-    // 更新最终统计数据（使用队列的准确数据）
+    // 🔄 更新最终统计数据（使用实际统计数据，正确反映重试成功的情况）
     updateStats(false, {
       total: finalStatus.total,
-      processed: finalStatus.completed + finalStatus.failed,
-      successful: finalStatus.completed,
-      failed: finalStatus.failed,
+      processed: realStats.actualSuccessful + realStats.actualFailed,
+      successful: realStats.actualSuccessful,
+      failed: realStats.actualFailed,
       changed: 0, // 先重置，下面会重新计算
       skipped: 0, // 先重置，下面会重新计算
     });
